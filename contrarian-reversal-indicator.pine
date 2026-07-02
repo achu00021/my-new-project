@@ -1,0 +1,296 @@
+//@version=6
+indicator("Contrarian Reversal Pro+ [Buy/Sell]", shorttitle="Contrarian Pro+", overlay=true, max_labels_count=500, max_lines_count=500)
+
+// ============================================================================
+//  CONTRARIAN REVERSAL PRO+
+//  ---------------------------------------------------------------------------
+//  A contrarian (mean-reversion) indicator designed for a higher win rate by
+//  requiring MULTIPLE confirmations before printing a signal:
+//
+//    1. Composite exhaustion score  -> RSI + Stochastic + CCI + Bollinger %B
+//       must all agree the market is at an extreme (crowd is one-sided).
+//    2. Price rejection             -> price must pierce the Bollinger Band
+//       and then CLOSE back inside it with a reversal candle. This avoids
+//       "catching a falling knife" while the move is still extending.
+//    3. Trend filter                -> only fade moves in the direction of the
+//       long-term trend, optionally taken from a HIGHER TIMEFRAME.
+//    4. ADX regime filter           -> skips signals during runaway trends,
+//       where mean reversion performs worst.
+//    5. RSI divergence detection    -> signals backed by a fresh divergence
+//       are graded STRONG (BUY+ / SELL+).
+//    6. Signal cooldown             -> prevents clusters of repeated signals.
+//
+//  Every signal also gets an ATR-based trade plan (entry / stop / target)
+//  drawn on the chart, and the built-in stats engine simulates each trade
+//  with first-touch logic (did price hit TP or SL first?) to report a
+//  realistic win rate and net R-multiple in the top-right table.
+// ============================================================================
+
+// ---------------------------------------------------------------- Inputs ---
+grpScore   = "Exhaustion Score"
+rsiLen     = input.int(14,  "RSI Length",         minval=2,  group=grpScore)
+stochLen   = input.int(14,  "Stochastic Length",  minval=2,  group=grpScore)
+cciLen     = input.int(20,  "CCI Length",         minval=2,  group=grpScore)
+buyThresh  = input.int(20,  "Oversold Threshold (Buy Zone)",   minval=1, maxval=49, group=grpScore)
+sellThresh = input.int(80,  "Overbought Threshold (Sell Zone)", minval=51, maxval=99, group=grpScore)
+
+grpBB      = "Bollinger Rejection"
+bbLen      = input.int(20,    "BB Length",      minval=2, group=grpBB)
+bbMult     = input.float(2.0, "BB Multiplier",  minval=0.5, step=0.1, group=grpBB)
+setupBars  = input.int(3,     "Setup Valid For (bars)", minval=1, maxval=20, group=grpBB,
+     tooltip="After an extreme reading, the rejection candle must appear within this many bars.")
+
+grpDiv     = "RSI Divergence (signal booster)"
+useDiv     = input.bool(true, "Detect RSI Divergence", group=grpDiv,
+     tooltip="A signal backed by a fresh RSI divergence is graded STRONG (BUY+ / SELL+).")
+pivL       = input.int(5, "Pivot Left Bars",  minval=1, maxval=20, group=grpDiv)
+pivR       = input.int(2, "Pivot Right Bars", minval=1, maxval=10, group=grpDiv)
+divValid   = input.int(12, "Divergence Valid For (bars)", minval=1, maxval=50, group=grpDiv)
+
+grpFilter  = "Filters (win-rate boosters)"
+useTrend   = input.bool(true, "Use Trend Filter (EMA)", group=grpFilter,
+     tooltip="BUY only above the trend EMA, SELL only below it. Fading pullbacks inside a trend wins far more often than fighting the trend.")
+trendLen   = input.int(200, "Trend EMA Length", minval=10, group=grpFilter)
+htfTf      = input.timeframe("", "Trend Timeframe (blank = chart)", group=grpFilter,
+     tooltip="Take the trend EMA from a higher timeframe (e.g. 240 or D) for stronger context. Uses confirmed HTF bars only, so it does not repaint.")
+useAdx     = input.bool(true, "Avoid Runaway Trends (ADX)", group=grpFilter,
+     tooltip="Skip signals when ADX is above the limit. Mean reversion loses most often inside violent one-way trends.")
+adxMax     = input.int(45, "Max ADX", minval=10, maxval=90, group=grpFilter)
+useVolume  = input.bool(false, "Require Volume Spike (capitulation)", group=grpFilter,
+     tooltip="Signal only when volume exceeds its average, i.e. a capitulation/blow-off bar. Disable on symbols without volume data.")
+volMult    = input.float(1.3, "Volume Spike Multiplier", minval=1.0, step=0.1, group=grpFilter)
+cooldown   = input.int(8, "Cooldown Between Signals (bars)", minval=0, group=grpFilter)
+
+grpRisk    = "Trade Plan (ATR based)"
+atrLen     = input.int(14,    "ATR Length",         minval=1, group=grpRisk)
+slMult     = input.float(1.5, "Stop Loss (ATR x)",  minval=0.1, step=0.1, group=grpRisk)
+rrRatio    = input.float(1.5, "Reward : Risk",      minval=0.5, step=0.1, group=grpRisk)
+maxHold    = input.int(30, "Max Holding Bars", minval=1, maxval=200, group=grpRisk,
+     tooltip="If neither the target nor the stop is touched within this many bars, the simulated trade is closed at market.")
+showPlan   = input.bool(true, "Draw Entry / Stop / Target Lines", group=grpRisk)
+
+grpStats   = "Statistics & Alerts"
+showStats  = input.bool(true, "Show Win-Rate Table", group=grpStats)
+useAlert   = input.bool(false, "Fire alert() Messages (any-alert-function-call)", group=grpStats,
+     tooltip="Sends a dynamic alert with the full trade plan. Create the alert with condition 'Any alert() function call'.")
+
+// ------------------------------------------------------ Exhaustion score ---
+rsiVal   = ta.rsi(close, rsiLen)
+stochVal = ta.sma(ta.stoch(close, high, low, stochLen), 3)
+
+// CCI rescaled from roughly [-200, 200] to [0, 100]
+cciRaw   = ta.cci(close, cciLen)
+cciVal   = math.max(0.0, math.min(100.0, (cciRaw + 200) / 4))
+
+// Bollinger %B rescaled to [0, 100]
+bbBasis  = ta.sma(close, bbLen)
+bbDev    = ta.stdev(close, bbLen) * bbMult
+bbUpper  = bbBasis + bbDev
+bbLower  = bbBasis - bbDev
+bbRange  = math.max(bbUpper - bbLower, syminfo.mintick)   // guard: never divide by zero
+pctB     = math.max(0.0, math.min(100.0, (close - bbLower) / bbRange * 100))
+
+score = (rsiVal + stochVal + cciVal + pctB) / 4.0
+
+// --------------------------------------------------------- RSI divergence ---
+plPrice = ta.pivotlow(low, pivL, pivR)
+phPrice = ta.pivothigh(high, pivL, pivR)
+
+var float prevPlPrice = na
+var float prevPlRsi   = na
+bullDivEvent = false
+if not na(plPrice)
+    rsiAtPl = rsiVal[pivR]
+    if not na(prevPlPrice) and plPrice < prevPlPrice and rsiAtPl > prevPlRsi
+        bullDivEvent := true
+    prevPlPrice := plPrice
+    prevPlRsi   := rsiAtPl
+
+var float prevPhPrice = na
+var float prevPhRsi   = na
+bearDivEvent = false
+if not na(phPrice)
+    rsiAtPh = rsiVal[pivR]
+    if not na(prevPhPrice) and phPrice > prevPhPrice and rsiAtPh < prevPhRsi
+        bearDivEvent := true
+    prevPhPrice := phPrice
+    prevPhRsi   := rsiAtPh
+
+bsBullDiv = ta.barssince(bullDivEvent)
+bsBearDiv = ta.barssince(bearDivEvent)
+freshBullDiv = useDiv and not na(bsBullDiv) and bsBullDiv <= divValid
+freshBearDiv = useDiv and not na(bsBearDiv) and bsBearDiv <= divValid
+
+// ----------------------------------------------------------------- Filters ---
+// Trend EMA, optionally from a higher timeframe. The [1] + lookahead_on
+// combination returns the last CONFIRMED HTF value, so it never repaints.
+emaChart = ta.ema(close, trendLen)
+emaHtf   = request.security(syminfo.tickerid, htfTf, ta.ema(close, trendLen)[1], lookahead=barmerge.lookahead_on)
+trendRef = htfTf == "" ? emaChart : emaHtf
+
+trendOkBuy  = not useTrend or close > trendRef
+trendOkSell = not useTrend or close < trendRef
+
+[diPlus, diMinus, adxVal] = ta.dmi(14, 14)
+adxOk = not useAdx or na(adxVal) or adxVal <= adxMax
+
+volSma = ta.sma(nz(volume), 20)   // computed every bar to keep the series consistent
+volOk  = not useVolume or (not na(volume) and volume > volSma * volMult)
+
+atrVal = ta.atr(atrLen)
+dataOk = not na(score) and not na(atrVal)
+
+// ------------------------------------------------------------- Conditions ---
+// Step 1: extreme reading while price is outside the band (crowd one-sided)
+buySetup  = score <= buyThresh  and low  < bbLower
+sellSetup = score >= sellThresh and high > bbUpper
+
+// Step 2: rejection candle closing back inside the band within `setupBars`
+// (na-guarded: ta.barssince returns na until the first setup ever occurs)
+bsBuy  = ta.barssince(buySetup)
+bsSell = ta.barssince(sellSetup)
+buySetupRecent  = not na(bsBuy)  and bsBuy  <= setupBars - 1
+sellSetupRecent = not na(bsSell) and bsSell <= setupBars - 1
+
+buyReject  = close > bbLower and close > open and close > close[1]
+sellReject = close < bbUpper and close < open and close < close[1]
+
+rawBuy  = buySetupRecent  and buyReject  and trendOkBuy  and adxOk and volOk and dataOk
+rawSell = sellSetupRecent and sellReject and trendOkSell and adxOk and volOk and dataOk
+
+// Step 3: cooldown so signals do not cluster
+var int lastSignalBar = -100000
+canSignal  = (bar_index - lastSignalBar) > cooldown
+buySignal  = rawBuy  and canSignal
+sellSignal = rawSell and not buySignal and canSignal
+
+// Signal grading: divergence-backed or ultra-extreme signals are STRONG
+buyStrong  = buySignal  and (freshBullDiv or score <= math.max(buyThresh - 10, 5))
+sellStrong = sellSignal and (freshBearDiv or score >= math.min(sellThresh + 10, 95))
+buyNormal  = buySignal  and not buyStrong
+sellNormal = sellSignal and not sellStrong
+
+// -------------------------------------------- Trade simulation (win rate) ---
+// Each signal opens a simulated trade with an ATR stop and an R:R target.
+// Trades are resolved by FIRST TOUCH of stop or target (stop wins ties, the
+// conservative assumption), or closed at market after `maxHold` bars.
+riskAbs = math.max(atrVal * slMult, syminfo.mintick)
+
+var dirArr   = array.new<int>()
+var entryArr = array.new<float>()
+var slArr    = array.new<float>()
+var tpArr    = array.new<float>()
+var barArr   = array.new<int>()
+
+var int   buyWinsN   = 0
+var int   buyTotalN  = 0
+var float buyNetR    = 0.0
+var int   sellWinsN  = 0
+var int   sellTotalN = 0
+var float sellNetR   = 0.0
+
+if array.size(dirArr) > 0
+    for i = array.size(dirArr) - 1 to 0
+        openedBar = array.get(barArr, i)
+        if openedBar == bar_index
+            continue
+        d     = array.get(dirArr, i)
+        en    = array.get(entryArr, i)
+        slp   = array.get(slArr, i)
+        tpp   = array.get(tpArr, i)
+        risk  = math.max(math.abs(en - slp), syminfo.mintick)
+        hitSl = d > 0 ? low <= slp : high >= slp
+        hitTp = d > 0 ? high >= tpp : low <= tpp
+        timedOut = bar_index - openedBar >= maxHold
+        if hitSl or hitTp or timedOut
+            rMult = hitSl ? -1.0 : hitTp ? rrRatio : (d > 0 ? close - en : en - close) / risk
+            if d > 0
+                buyTotalN += 1
+                buyNetR   += rMult
+                if rMult > 0
+                    buyWinsN += 1
+            else
+                sellTotalN += 1
+                sellNetR   += rMult
+                if rMult > 0
+                    sellWinsN += 1
+            array.remove(dirArr, i)
+            array.remove(entryArr, i)
+            array.remove(slArr, i)
+            array.remove(tpArr, i)
+            array.remove(barArr, i)
+
+if buySignal or sellSignal
+    lastSignalBar := bar_index
+    dirNew = buySignal ? 1 : -1
+    enNew  = close
+    slNew  = buySignal ? close - riskAbs : close + riskAbs
+    tpNew  = buySignal ? close + riskAbs * rrRatio : close - riskAbs * rrRatio
+    array.push(dirArr, dirNew)
+    array.push(entryArr, enNew)
+    array.push(slArr, slNew)
+    array.push(tpArr, tpNew)
+    array.push(barArr, bar_index)
+    if showPlan
+        line.new(bar_index, enNew, bar_index + 8, enNew, color=color.new(color.gray, 20), style=line.style_dotted, width=1)
+        line.new(bar_index, slNew, bar_index + 8, slNew, color=color.new(#f23645, 0), style=line.style_dotted, width=1)
+        line.new(bar_index, tpNew, bar_index + 8, tpNew, color=color.new(#089981, 0), style=line.style_dotted, width=1)
+    if useAlert
+        alert((buySignal ? "BUY" : "SELL") + (buyStrong or sellStrong ? "+ (strong)" : "") + " " + syminfo.ticker + " @ " + str.tostring(close, format.mintick) + " | SL " + str.tostring(slNew, format.mintick) + " | TP " + str.tostring(tpNew, format.mintick), alert.freq_once_per_bar_close)
+
+// --------------------------------------------------------------- Visuals ---
+plot(bbUpper, "BB Upper", color=color.new(color.gray, 60))
+plot(bbLower, "BB Lower", color=color.new(color.gray, 60))
+plot(bbBasis, "BB Basis", color=color.new(color.gray, 75))
+plot(useTrend ? trendRef : na, "Trend EMA", color=color.new(color.orange, 30), linewidth=2)
+
+bgcolor(score <= buyThresh ? color.new(color.green, 92) : score >= sellThresh ? color.new(color.red, 92) : na)
+
+plotshape(buyNormal,  title="BUY",   style=shape.labelup,   location=location.belowbar,
+     color=color.new(#089981, 0), text="BUY",   textcolor=color.white, size=size.small)
+plotshape(buyStrong,  title="BUY+",  style=shape.labelup,   location=location.belowbar,
+     color=color.new(#0a5c47, 0), text="BUY+",  textcolor=color.white, size=size.normal)
+plotshape(sellNormal, title="SELL",  style=shape.labeldown, location=location.abovebar,
+     color=color.new(#f23645, 0), text="SELL",  textcolor=color.white, size=size.small)
+plotshape(sellStrong, title="SELL+", style=shape.labeldown, location=location.abovebar,
+     color=color.new(#801922, 0), text="SELL+", textcolor=color.white, size=size.normal)
+
+// Divergence markers (small, informational)
+plotshape(useDiv and bullDivEvent, title="Bull Div", style=shape.triangleup,   location=location.belowbar,
+     color=color.new(color.teal, 40), size=size.tiny)
+plotshape(useDiv and bearDivEvent, title="Bear Div", style=shape.triangledown, location=location.abovebar,
+     color=color.new(color.maroon, 40), size=size.tiny)
+
+// Stats table (drawn only on the last bar; cheap and safe)
+var table statsTbl = table.new(position.top_right, 4, 4, border_width=1)
+if showStats and barstate.islast
+    totalAll = buyTotalN + sellTotalN
+    winsAll  = buyWinsN + sellWinsN
+    netRAll  = buyNetR + sellNetR
+    // multiply by 100.0 first so the division happens in float (int/int truncates)
+    buyWr  = buyTotalN  > 0 ? buyWinsN  * 100.0 / buyTotalN  : 0.0
+    sellWr = sellTotalN > 0 ? sellWinsN * 100.0 / sellTotalN : 0.0
+    allWr  = totalAll   > 0 ? winsAll   * 100.0 / totalAll   : 0.0
+    hdrBg = color.new(color.gray, 20)
+    table.cell(statsTbl, 0, 0, "Signal", text_color=color.white, bgcolor=hdrBg)
+    table.cell(statsTbl, 1, 0, "Count",  text_color=color.white, bgcolor=hdrBg)
+    table.cell(statsTbl, 2, 0, "Win %",  text_color=color.white, bgcolor=hdrBg)
+    table.cell(statsTbl, 3, 0, "Net R",  text_color=color.white, bgcolor=hdrBg)
+    table.cell(statsTbl, 0, 1, "BUY",  text_color=color.white, bgcolor=color.new(#089981, 30))
+    table.cell(statsTbl, 1, 1, str.tostring(buyTotalN),           text_color=color.white, bgcolor=color.new(#089981, 60))
+    table.cell(statsTbl, 2, 1, str.tostring(buyWr, "#.#") + "%",  text_color=color.white, bgcolor=color.new(#089981, 60))
+    table.cell(statsTbl, 3, 1, str.tostring(buyNetR, "#.##"),     text_color=color.white, bgcolor=color.new(#089981, 60))
+    table.cell(statsTbl, 0, 2, "SELL", text_color=color.white, bgcolor=color.new(#f23645, 30))
+    table.cell(statsTbl, 1, 2, str.tostring(sellTotalN),          text_color=color.white, bgcolor=color.new(#f23645, 60))
+    table.cell(statsTbl, 2, 2, str.tostring(sellWr, "#.#") + "%", text_color=color.white, bgcolor=color.new(#f23645, 60))
+    table.cell(statsTbl, 3, 2, str.tostring(sellNetR, "#.##"),    text_color=color.white, bgcolor=color.new(#f23645, 60))
+    table.cell(statsTbl, 0, 3, "ALL",  text_color=color.white, bgcolor=color.new(color.blue, 30))
+    table.cell(statsTbl, 1, 3, str.tostring(totalAll),            text_color=color.white, bgcolor=color.new(color.blue, 60))
+    table.cell(statsTbl, 2, 3, str.tostring(allWr, "#.#") + "%",  text_color=color.white, bgcolor=color.new(color.blue, 60))
+    table.cell(statsTbl, 3, 3, str.tostring(netRAll, "#.##"),     text_color=color.white, bgcolor=color.new(color.blue, 60))
+
+// ---------------------------------------------------------------- Alerts ---
+alertcondition(buySignal,  title="Contrarian BUY",  message="Contrarian Pro+: BUY signal on {{ticker}} ({{interval}}) at {{close}}")
+alertcondition(sellSignal, title="Contrarian SELL", message="Contrarian Pro+: SELL signal on {{ticker}} ({{interval}}) at {{close}}")
+alertcondition(buyStrong,  title="Contrarian BUY+ (strong)",  message="Contrarian Pro+: STRONG BUY on {{ticker}} ({{interval}}) at {{close}}")
+alertcondition(sellStrong, title="Contrarian SELL+ (strong)", message="Contrarian Pro+: STRONG SELL on {{ticker}} ({{interval}}) at {{close}}")
