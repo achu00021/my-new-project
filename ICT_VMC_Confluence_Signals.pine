@@ -15,6 +15,15 @@
 //   5. (Optional) Inside a Killzone session           (time filter      - ICT)
 // A STRONG BUY additionally requires a recent bullish WaveTrend divergence.
 // SELL signals mirror the logic. Every filter can be toggled off.
+//
+// SCALP MODE
+// ----------
+// Scalp Mode fires multiple stacked entries along a move using a looser
+// WaveTrend trigger while keeping the ICT structure/zone/flow filters.
+// Each entry is tracked individually with a take profit of at least the
+// "Min profit per entry (%)" input (default 0.3%) and its own stop loss.
+// Entry / TP / SL lines are drawn per entry and the dashboard shows open
+// scalps, wins/losses and the live winrate.
 
 //@version=5
 indicator("ICT + VMC Confluence Signals", shorttitle = "ICT+VMC Signals",
@@ -70,6 +79,15 @@ nySess  = input.session("0700-0900" , "New York (NY time)"      , group = grpKZ)
 loSess  = input.session("0700-1000" , "London Open (London time)", group = grpKZ)
 nyCss   = input.color  (color.new(#ff5d00, 93), "NY color"     , group = grpKZ)
 loCss   = input.color  (color.new(#00bcd4, 93), "London color" , group = grpKZ)
+
+grpSC   = "Scalp Mode"
+enableScalp    = input.bool (true , "Enable scalp entries"                      , group = grpSC)
+scalpTPpct     = input.float(0.3  , "Min profit per entry (%)"                  , minval = 0.3, maxval = 5 , step = 0.1 , group = grpSC)
+scalpSLpct     = input.float(0.45 , "Stop loss per entry (%)"                   , minval = 0.1, maxval = 10, step = 0.05, group = grpSC)
+scalpMaxOpen   = input.int  (3    , "Max simultaneous entries per side"         , minval = 1  , maxval = 10, group = grpSC)
+scalpSpacing   = input.int  (3    , "Min bars between entries"                  , minval = 1  , maxval = 50, group = grpSC)
+scalpWTLevel   = input.int  (0    , "Scalp WT level (long below / short above)" , group = grpSC)
+showScalpLines = input.bool (true , "Show entry / TP / SL lines"                , group = grpSC)
 
 grpUI   = "Display"
 showDash    = input.bool(true, "Show dashboard"        , group = grpUI)
@@ -346,6 +364,157 @@ strongBuy  = buySignal  and recentBullDiv
 strongSell = sellSignal and recentBearDiv
 
 //-----------------------------------------------------------------------------
+// Scalp Mode - multiple entries, each targeting at least the min profit %
+//-----------------------------------------------------------------------------
+// A scalp entry uses a looser momentum trigger (any WT cross below/above the
+// scalp level instead of full oversold/overbought) but keeps the ICT filters,
+// so several entries can stack along one move. Each entry is tracked
+// individually: TP = entry * (1 + min profit %), SL = entry * (1 - stop %).
+
+var float[] sLongEntry  = array.new<float>()
+var int[]   sLongBar    = array.new<int>()
+var line[]  sLongEnLn   = array.new<line>()
+var line[]  sLongTpLn   = array.new<line>()
+var line[]  sLongSlLn   = array.new<line>()
+
+var float[] sShortEntry = array.new<float>()
+var int[]   sShortBar   = array.new<int>()
+var line[]  sShortEnLn  = array.new<line>()
+var line[]  sShortTpLn  = array.new<line>()
+var line[]  sShortSlLn  = array.new<line>()
+
+var int scalpWins   = 0
+var int scalpLosses = 0
+var int lastLongBar  = na
+var int lastShortBar = na
+
+cTP = color.new(#00e676, 0)
+cSL = color.new(#ff5252, 0)
+cEN = color.new(#b2b5be, 30)
+
+// --- Manage open long scalps (SL checked first = conservative) ---
+longTPhit = false
+longSLhit = false
+if array.size(sLongEntry) > 0
+    for i = array.size(sLongEntry) - 1 to 0
+        e   = array.get(sLongEntry, i)
+        eb  = array.get(sLongBar  , i)
+        tpP = e * (1 + scalpTPpct / 100)
+        slP = e * (1 - scalpSLpct / 100)
+        hitSL = bar_index > eb and low  <= slP
+        hitTP = bar_index > eb and not hitSL and high >= tpP
+        if hitSL or hitTP
+            if hitTP
+                scalpWins += 1
+                longTPhit := true
+                if showScalpLines
+                    label.new(bar_index, tpP, "✓ +" + str.tostring(scalpTPpct, "#.##") + "%",
+                         style = label.style_label_down, color = color.new(#00e676, 20),
+                         textcolor = color.black, size = size.tiny)
+            else
+                scalpLosses += 1
+                longSLhit := true
+                if showScalpLines
+                    label.new(bar_index, slP, "✕ stop",
+                         style = label.style_label_up, color = color.new(#ff5252, 20),
+                         textcolor = color.white, size = size.tiny)
+            line.set_x2(array.get(sLongEnLn, i), bar_index)
+            line.set_x2(array.get(sLongTpLn, i), bar_index)
+            line.set_x2(array.get(sLongSlLn, i), bar_index)
+            array.remove(sLongEntry, i), array.remove(sLongBar , i)
+            array.remove(sLongEnLn , i), array.remove(sLongTpLn, i), array.remove(sLongSlLn, i)
+        else
+            line.set_x2(array.get(sLongEnLn, i), bar_index + 1)
+            line.set_x2(array.get(sLongTpLn, i), bar_index + 1)
+            line.set_x2(array.get(sLongSlLn, i), bar_index + 1)
+
+// --- Manage open short scalps ---
+shortTPhit = false
+shortSLhit = false
+if array.size(sShortEntry) > 0
+    for i = array.size(sShortEntry) - 1 to 0
+        e   = array.get(sShortEntry, i)
+        eb  = array.get(sShortBar  , i)
+        tpP = e * (1 - scalpTPpct / 100)
+        slP = e * (1 + scalpSLpct / 100)
+        hitSL = bar_index > eb and high >= slP
+        hitTP = bar_index > eb and not hitSL and low <= tpP
+        if hitSL or hitTP
+            if hitTP
+                scalpWins += 1
+                shortTPhit := true
+                if showScalpLines
+                    label.new(bar_index, tpP, "✓ +" + str.tostring(scalpTPpct, "#.##") + "%",
+                         style = label.style_label_up, color = color.new(#00e676, 20),
+                         textcolor = color.black, size = size.tiny)
+            else
+                scalpLosses += 1
+                shortSLhit := true
+                if showScalpLines
+                    label.new(bar_index, slP, "✕ stop",
+                         style = label.style_label_down, color = color.new(#ff5252, 20),
+                         textcolor = color.white, size = size.tiny)
+            line.set_x2(array.get(sShortEnLn, i), bar_index)
+            line.set_x2(array.get(sShortTpLn, i), bar_index)
+            line.set_x2(array.get(sShortSlLn, i), bar_index)
+            array.remove(sShortEntry, i), array.remove(sShortBar , i)
+            array.remove(sShortEnLn , i), array.remove(sShortTpLn, i), array.remove(sShortSlLn, i)
+        else
+            line.set_x2(array.get(sShortEnLn, i), bar_index + 1)
+            line.set_x2(array.get(sShortTpLn, i), bar_index + 1)
+            line.set_x2(array.get(sShortSlLn, i), bar_index + 1)
+
+// --- New scalp entries ---
+scalpLong = enableScalp and wtCrossUp and wt2 < scalpWTLevel
+     and (not useStructFilter or structBull)
+     and (not useZoneFilter   or bullZoneRecent)
+     and (not useMFFilter     or rsiMFI > 0)
+     and (not useKZFilter     or inKillzone)
+     and array.size(sLongEntry) < scalpMaxOpen
+     and (na(lastLongBar) or bar_index - lastLongBar >= scalpSpacing)
+     and barstate.isconfirmed
+
+scalpShort = enableScalp and wtCrossDown and wt2 > scalpWTLevel
+     and (not useStructFilter or structBear)
+     and (not useZoneFilter   or bearZoneRecent)
+     and (not useMFFilter     or rsiMFI < 0)
+     and (not useKZFilter     or inKillzone)
+     and array.size(sShortEntry) < scalpMaxOpen
+     and (na(lastShortBar) or bar_index - lastShortBar >= scalpSpacing)
+     and barstate.isconfirmed
+
+if scalpLong
+    e   = close
+    tpP = e * (1 + scalpTPpct / 100)
+    slP = e * (1 - scalpSLpct / 100)
+    lnCol   = showScalpLines ? cEN : color(na)
+    tpCol   = showScalpLines ? cTP : color(na)
+    slCol   = showScalpLines ? cSL : color(na)
+    array.push(sLongEntry, e)
+    array.push(sLongBar  , bar_index)
+    array.push(sLongEnLn , line.new(bar_index, e  , bar_index + 1, e  , color = lnCol, style = line.style_solid))
+    array.push(sLongTpLn , line.new(bar_index, tpP, bar_index + 1, tpP, color = tpCol, style = line.style_dotted))
+    array.push(sLongSlLn , line.new(bar_index, slP, bar_index + 1, slP, color = slCol, style = line.style_dotted))
+    lastLongBar := bar_index
+
+if scalpShort
+    e   = close
+    tpP = e * (1 - scalpTPpct / 100)
+    slP = e * (1 + scalpSLpct / 100)
+    lnCol   = showScalpLines ? cEN : color(na)
+    tpCol   = showScalpLines ? cTP : color(na)
+    slCol   = showScalpLines ? cSL : color(na)
+    array.push(sShortEntry, e)
+    array.push(sShortBar  , bar_index)
+    array.push(sShortEnLn , line.new(bar_index, e  , bar_index + 1, e  , color = lnCol, style = line.style_solid))
+    array.push(sShortTpLn , line.new(bar_index, tpP, bar_index + 1, tpP, color = tpCol, style = line.style_dotted))
+    array.push(sShortSlLn , line.new(bar_index, slP, bar_index + 1, slP, color = slCol, style = line.style_dotted))
+    lastShortBar := bar_index
+
+scalpTotal   = scalpWins + scalpLosses
+scalpWinrate = scalpTotal > 0 ? 100.0 * scalpWins / scalpTotal : na
+
+//-----------------------------------------------------------------------------
 // Plots
 //-----------------------------------------------------------------------------
 plotshape(showWTdots and wtCrossUp   and wtOversold   , title = "WT cross up (raw)"  ,
@@ -372,10 +541,17 @@ plotshape(wtBullDiv, title = "WT Bullish Divergence", style = shape.diamond,
 plotshape(wtBearDiv, title = "WT Bearish Divergence", style = shape.diamond,
      location = location.abovebar, color = color.new(#ff5252, 40), size = size.tiny, offset = -2)
 
+plotshape(scalpLong , title = "Scalp Long" , text = "S", style = shape.triangleup  ,
+     location = location.belowbar, color = color.new(#00bcd4, 0),
+     textcolor = color.new(#00bcd4, 0), size = size.tiny)
+plotshape(scalpShort, title = "Scalp Short", text = "S", style = shape.triangledown,
+     location = location.abovebar, color = color.new(#ff9800, 0),
+     textcolor = color.new(#ff9800, 0), size = size.tiny)
+
 //-----------------------------------------------------------------------------
 // Dashboard
 //-----------------------------------------------------------------------------
-var table dash = table.new(position.top_right, 2, 6, bgcolor = color.new(color.black, 30),
+var table dash = table.new(position.top_right, 2, 9, bgcolor = color.new(color.black, 30),
      border_color = color.new(color.gray, 60), border_width = 1)
 
 if showDash and barstate.islast
@@ -399,6 +575,15 @@ if showDash and barstate.islast
     table.cell(dash, 0, 5, "Bear zone"    , text_color = nCol, text_size = size.tiny)
     table.cell(dash, 1, 5, bearZoneRecent ? "Active" : "-",
          text_color = bearZoneRecent ? dnCol : nCol, text_size = size.tiny)
+    table.cell(dash, 0, 6, "Open scalps"  , text_color = nCol, text_size = size.tiny)
+    table.cell(dash, 1, 6, str.tostring(array.size(sLongEntry)) + " L / " + str.tostring(array.size(sShortEntry)) + " S",
+         text_color = nCol, text_size = size.tiny)
+    table.cell(dash, 0, 7, "Scalp W / L"  , text_color = nCol, text_size = size.tiny)
+    table.cell(dash, 1, 7, str.tostring(scalpWins) + " / " + str.tostring(scalpLosses),
+         text_color = scalpWins >= scalpLosses ? upCol : dnCol, text_size = size.tiny)
+    table.cell(dash, 0, 8, "Scalp winrate", text_color = nCol, text_size = size.tiny)
+    table.cell(dash, 1, 8, na(scalpWinrate) ? "-" : str.tostring(scalpWinrate, "#.#") + "%",
+         text_color = na(scalpWinrate) ? nCol : scalpWinrate >= 50 ? upCol : dnCol, text_size = size.tiny)
 
 //-----------------------------------------------------------------------------
 // Alerts
@@ -408,3 +593,9 @@ alertcondition(strongBuy , "Strong Buy signal" , "ICT+VMC: STRONG Buy - confluen
 alertcondition(sellSignal, "Sell signal"       , "ICT+VMC: Sell - WT overbought cross down with ICT confluence")
 alertcondition(strongSell, "Strong Sell signal", "ICT+VMC: STRONG Sell - confluence + bearish divergence")
 alertcondition(buySignal or sellSignal, "Any signal", "ICT+VMC: Buy or Sell signal")
+
+alertcondition(scalpLong             , "Scalp Long entry"  , "ICT+VMC Scalp: Long entry - TP at min profit target")
+alertcondition(scalpShort            , "Scalp Short entry" , "ICT+VMC Scalp: Short entry - TP at min profit target")
+alertcondition(scalpLong or scalpShort, "Scalp entry (any)", "ICT+VMC Scalp: new scalp entry")
+alertcondition(longTPhit or shortTPhit, "Scalp TP hit"     , "ICT+VMC Scalp: take profit reached (min profit secured)")
+alertcondition(longSLhit or shortSLhit, "Scalp SL hit"     , "ICT+VMC Scalp: stop loss hit")
