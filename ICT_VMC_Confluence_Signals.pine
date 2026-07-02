@@ -1,0 +1,410 @@
+// This work is licensed under a Attribution-NonCommercial-ShareAlike 4.0 International (CC BY-NC-SA 4.0)
+// https://creativecommons.org/licenses/by-nc-sa/4.0/
+// Combines concepts from "ICT Concepts [LuxAlgo]" (© LuxAlgo) and
+// "VuManChu B Divergences" (© VuManChu) into a single confluence signal indicator.
+//
+// HOW IT INCREASES WINRATE
+// ------------------------
+// Instead of taking every WaveTrend cross (VuManChu) or trading every ICT zone,
+// a BUY prints only when several independent conditions agree:
+//   1. WaveTrend crosses UP while oversold            (momentum trigger - VMC)
+//   2. Market structure is bullish (MSS/BOS up)       (trend filter     - ICT)
+//   3. Price is inside / just tapped a bullish FVG
+//      or bullish Order Block                         (location filter  - ICT)
+//   4. Money Flow (RSI+MFI area) is positive          (flow filter      - VMC)
+//   5. (Optional) Inside a Killzone session           (time filter      - ICT)
+// A STRONG BUY additionally requires a recent bullish WaveTrend divergence.
+// SELL signals mirror the logic. Every filter can be toggled off.
+
+//@version=5
+indicator("ICT + VMC Confluence Signals", shorttitle = "ICT+VMC Signals",
+     overlay = true, max_boxes_count = 500, max_lines_count = 500, max_labels_count = 500)
+
+//-----------------------------------------------------------------------------
+// Inputs
+//-----------------------------------------------------------------------------
+grpSig  = "Signals"
+useStructFilter = input.bool(true , "Require Market Structure agreement", group = grpSig)
+useZoneFilter   = input.bool(true , "Require FVG / Order Block zone"    , group = grpSig)
+useMFFilter     = input.bool(true , "Require Money Flow agreement"      , group = grpSig)
+useKZFilter     = input.bool(false, "Require Killzone session"          , group = grpSig)
+zoneLookback    = input.int (5    , "Zone tap lookback (bars)"          , minval = 0, maxval = 20 , group = grpSig)
+divLookback     = input.int (8    , "Divergence lookback (bars)"        , minval = 1, maxval = 30 , group = grpSig)
+
+grpWT   = "WaveTrend (VuManChu)"
+wtChannelLen = input.int   (9   , "WT Channel Length" , group = grpWT)
+wtAverageLen = input.int   (12  , "WT Average Length" , group = grpWT)
+wtMASource   = input.source(hlc3, "WT MA Source"      , group = grpWT)
+wtMALen      = input.int   (3   , "WT MA Length"      , group = grpWT)
+obLevel      = input.int   (53  , "WT Overbought Level", group = grpWT)
+osLevel      = input.int   (-53 , "WT Oversold Level"  , group = grpWT)
+wtDivOBLevel = input.int   (45  , "WT Bearish Div min" , group = grpWT)
+wtDivOSLevel = input.int   (-65 , "WT Bullish Div min" , group = grpWT)
+
+grpMF   = "Money Flow (VuManChu)"
+mfPeriod     = input.int  (60 , "MFI Period"          , group = grpMF)
+mfMultiplier = input.float(150, "MFI Area multiplier" , group = grpMF)
+
+grpMS   = "Market Structure (ICT)"
+showMS  = input.bool (true, "Show MSS / BOS lines" , group = grpMS)
+msLen   = input.int  (5   , "Structure Length"     , minval = 3, maxval = 20, group = grpMS)
+cBull   = input.color(color.new(#00e6a1, 0), "Bullish", inline = "msc", group = grpMS)
+cBear   = input.color(color.new(#e60400, 0), "Bearish", inline = "msc", group = grpMS)
+
+grpFVG  = "Fair Value Gaps (ICT)"
+showFVG = input.bool (true, "Show FVGs"            , group = grpFVG)
+maxFVG  = input.int  (4   , "Max FVGs per side"    , minval = 1, maxval = 10, group = grpFVG)
+cFVGbl  = input.color(color.new(#00e676, 80), "Bullish FVG", inline = "fvgc", group = grpFVG)
+cFVGbr  = input.color(color.new(#ff5252, 80), "Bearish FVG", inline = "fvgc", group = grpFVG)
+
+grpOB   = "Order Blocks (ICT)"
+showOB  = input.bool (true, "Show Order Blocks"    , group = grpOB)
+obSwingLen = input.int(10 , "Swing Lookback"       , minval = 3, maxval = 30, group = grpOB)
+maxOB   = input.int  (3   , "Max OBs per side"     , minval = 1, maxval = 10, group = grpOB)
+cOBbl   = input.color(color.new(#3e89fa, 75), "Bullish OB", inline = "obc", group = grpOB)
+cOBbr   = input.color(color.new(#ff3131, 75), "Bearish OB", inline = "obc", group = grpOB)
+
+grpKZ   = "Killzones (ICT)"
+showKZ  = input.bool   (false       , "Show Killzone background", group = grpKZ)
+nySess  = input.session("0700-0900" , "New York (NY time)"      , group = grpKZ)
+loSess  = input.session("0700-1000" , "London Open (London time)", group = grpKZ)
+nyCss   = input.color  (color.new(#ff5d00, 93), "NY color"     , group = grpKZ)
+loCss   = input.color  (color.new(#00bcd4, 93), "London color" , group = grpKZ)
+
+grpUI   = "Display"
+showDash    = input.bool(true, "Show dashboard"        , group = grpUI)
+showWTdots  = input.bool(true, "Show raw WT cross dots", group = grpUI)
+
+//-----------------------------------------------------------------------------
+// VuManChu components (ported to v5)
+//-----------------------------------------------------------------------------
+// WaveTrend
+esa = ta.ema(wtMASource, wtChannelLen)
+de  = ta.ema(math.abs(wtMASource - esa), wtChannelLen)
+ci  = (wtMASource - esa) / (0.015 * de)
+wt1 = ta.ema(ci, wtAverageLen)
+wt2 = ta.sma(wt1, wtMALen)
+
+wtCrossUp   = ta.crossover (wt1, wt2)
+wtCrossDown = ta.crossunder(wt1, wt2)
+wtOversold   = wt2 <= osLevel
+wtOverbought = wt2 >= obLevel
+
+// Money Flow (RSI+MFI area)
+mfRange = high - low == 0 ? syminfo.mintick : high - low
+rsiMFI  = ta.sma((close - open) / mfRange * mfMultiplier, mfPeriod)
+
+// WaveTrend divergences (fractal based)
+fractalTopRaw = wt2[4] < wt2[2] and wt2[3] < wt2[2] and wt2[2] > wt2[1] and wt2[2] > wt2
+fractalBotRaw = wt2[4] > wt2[2] and wt2[3] > wt2[2] and wt2[2] < wt2[1] and wt2[2] < wt2
+fractalTop    = fractalTopRaw and wt2[2] >= wtDivOBLevel
+fractalBot    = fractalBotRaw and wt2[2] <= wtDivOSLevel
+
+prevTopWT  = ta.valuewhen(fractalTop, wt2[2] , 1)
+prevTopPx  = ta.valuewhen(fractalTop, high[2], 1)
+prevBotWT  = ta.valuewhen(fractalBot, wt2[2] , 1)
+prevBotPx  = ta.valuewhen(fractalBot, low[2] , 1)
+
+wtBearDiv = fractalTop and high[2] > prevTopPx and wt2[2] < prevTopWT
+wtBullDiv = fractalBot and low[2]  < prevBotPx and wt2[2] > prevBotWT
+
+barsSinceBullDiv = ta.barssince(wtBullDiv)
+barsSinceBearDiv = ta.barssince(wtBearDiv)
+recentBullDiv = not na(barsSinceBullDiv) and barsSinceBullDiv <= divLookback
+recentBearDiv = not na(barsSinceBearDiv) and barsSinceBearDiv <= divLookback
+
+//-----------------------------------------------------------------------------
+// ICT: Market Structure (MSS / BOS)
+//-----------------------------------------------------------------------------
+var float lastSwingHi  = na
+var int   lastSwingHiX = na
+var bool  swingHiUsed  = false
+var float lastSwingLo  = na
+var int   lastSwingLoX = na
+var bool  swingLoUsed  = false
+var int   msTrend      = 0
+
+ph = ta.pivothigh(high, msLen, msLen)
+pl = ta.pivotlow (low , msLen, msLen)
+
+if not na(ph)
+    lastSwingHi  := ph
+    lastSwingHiX := bar_index - msLen
+    swingHiUsed  := false
+if not na(pl)
+    lastSwingLo  := pl
+    lastSwingLoX := bar_index - msLen
+    swingLoUsed  := false
+
+bullBreak = not na(lastSwingHi) and not swingHiUsed and close > lastSwingHi
+bearBreak = not na(lastSwingLo) and not swingLoUsed and close < lastSwingLo
+
+mssBull = bullBreak and msTrend <= 0
+mssBear = bearBreak and msTrend >= 0
+
+if bullBreak
+    if showMS
+        line.new(lastSwingHiX, lastSwingHi, bar_index, lastSwingHi,
+             color = cBull, style = mssBull ? line.style_solid : line.style_dotted)
+        label.new(int(math.avg(lastSwingHiX, bar_index)), lastSwingHi,
+             text = mssBull ? "MSS" : "BOS", style = label.style_label_down,
+             color = color(na), textcolor = cBull, size = size.tiny)
+    swingHiUsed := true
+    msTrend     := 1
+
+if bearBreak
+    if showMS
+        line.new(lastSwingLoX, lastSwingLo, bar_index, lastSwingLo,
+             color = cBear, style = mssBear ? line.style_solid : line.style_dotted)
+        label.new(int(math.avg(lastSwingLoX, bar_index)), lastSwingLo,
+             text = mssBear ? "MSS" : "BOS", style = label.style_label_up,
+             color = color(na), textcolor = cBear, size = size.tiny)
+    swingLoUsed := true
+    msTrend     := -1
+
+structBull = msTrend == 1
+structBear = msTrend == -1
+
+//-----------------------------------------------------------------------------
+// ICT: Fair Value Gaps
+//-----------------------------------------------------------------------------
+var box[] fvgBullBoxes = array.new<box>()
+var box[] fvgBearBoxes = array.new<box>()
+
+bullFVG = low  > high[2] and close[1] > open[1]
+bearFVG = high < low[2]  and close[1] < open[1]
+
+if bullFVG
+    b = box.new(bar_index - 2, low, bar_index, high[2],
+         bgcolor = showFVG ? cFVGbl : color(na), border_color = showFVG ? cFVGbl : color(na),
+         text = showFVG ? "FVG" : "", text_size = size.tiny, text_color = showFVG ? cFVGbl : color(na))
+    array.unshift(fvgBullBoxes, b)
+    if array.size(fvgBullBoxes) > maxFVG
+        box.delete(array.pop(fvgBullBoxes))
+
+if bearFVG
+    b = box.new(bar_index - 2, low[2], bar_index, high,
+         bgcolor = showFVG ? cFVGbr : color(na), border_color = showFVG ? cFVGbr : color(na),
+         text = showFVG ? "FVG" : "", text_size = size.tiny, text_color = showFVG ? cFVGbr : color(na))
+    array.unshift(fvgBearBoxes, b)
+    if array.size(fvgBearBoxes) > maxFVG
+        box.delete(array.pop(fvgBearBoxes))
+
+// Manage bullish FVGs: extend while valid, remove once fully traded through
+inBullFVG = false
+if array.size(fvgBullBoxes) > 0
+    for i = array.size(fvgBullBoxes) - 1 to 0
+        b = array.get(fvgBullBoxes, i)
+        if low < box.get_bottom(b)
+            box.delete(b)
+            array.remove(fvgBullBoxes, i)
+        else
+            box.set_right(b, bar_index + 3)
+            if low <= box.get_top(b)
+                inBullFVG := true
+
+inBearFVG = false
+if array.size(fvgBearBoxes) > 0
+    for i = array.size(fvgBearBoxes) - 1 to 0
+        b = array.get(fvgBearBoxes, i)
+        if high > box.get_top(b)
+            box.delete(b)
+            array.remove(fvgBearBoxes, i)
+        else
+            box.set_right(b, bar_index + 3)
+            if high >= box.get_bottom(b)
+                inBearFVG := true
+
+//-----------------------------------------------------------------------------
+// ICT: Order Blocks (swing based)
+//-----------------------------------------------------------------------------
+var int   obOs        = 0
+var float obTopY      = na
+var int   obTopX      = na
+var bool  obTopUsed   = true
+var float obBtmY      = na
+var int   obBtmX      = na
+var bool  obBtmUsed   = true
+
+upperSw = ta.highest(high, obSwingLen)
+lowerSw = ta.lowest (low , obSwingLen)
+obOs := high[obSwingLen] > upperSw ? 0 : low[obSwingLen] < lowerSw ? 1 : obOs
+
+if obOs == 0 and obOs[1] != 0
+    obTopY    := high[obSwingLen]
+    obTopX    := bar_index - obSwingLen
+    obTopUsed := false
+if obOs == 1 and obOs[1] != 1
+    obBtmY    := low[obSwingLen]
+    obBtmX    := bar_index - obSwingLen
+    obBtmUsed := false
+
+var box[] obBullBoxes = array.new<box>()
+var box[] obBearBoxes = array.new<box>()
+
+// Bullish OB: swing high broken up -> lowest candle of the leg is demand
+if not obTopUsed and close > obTopY
+    obTopUsed := true
+    minLow   = low[1]
+    maxOfBar = math.max(close[1], open[1])
+    leftX    = bar_index - 1
+    span     = bar_index - obTopX - 1
+    if span >= 1
+        for i = 1 to span
+            if low[i] < minLow
+                minLow   := low[i]
+                maxOfBar := math.max(close[i], open[i])
+                leftX    := bar_index - i
+    b = box.new(leftX, maxOfBar, bar_index + 3, minLow,
+         bgcolor = showOB ? cOBbl : color(na), border_color = showOB ? cOBbl : color(na),
+         text = showOB ? "+OB" : "", text_size = size.tiny, text_color = showOB ? cOBbl : color(na))
+    array.unshift(obBullBoxes, b)
+    if array.size(obBullBoxes) > maxOB
+        box.delete(array.pop(obBullBoxes))
+
+// Bearish OB: swing low broken down -> highest candle of the leg is supply
+if not obBtmUsed and close < obBtmY
+    obBtmUsed := true
+    maxHigh  = high[1]
+    minOfBar = math.min(close[1], open[1])
+    leftX    = bar_index - 1
+    span     = bar_index - obBtmX - 1
+    if span >= 1
+        for i = 1 to span
+            if high[i] > maxHigh
+                maxHigh  := high[i]
+                minOfBar := math.min(close[i], open[i])
+                leftX    := bar_index - i
+    b = box.new(leftX, maxHigh, bar_index + 3, minOfBar,
+         bgcolor = showOB ? cOBbr : color(na), border_color = showOB ? cOBbr : color(na),
+         text = showOB ? "-OB" : "", text_size = size.tiny, text_color = showOB ? cOBbr : color(na))
+    array.unshift(obBearBoxes, b)
+    if array.size(obBearBoxes) > maxOB
+        box.delete(array.pop(obBearBoxes))
+
+inBullOB = false
+if array.size(obBullBoxes) > 0
+    for i = array.size(obBullBoxes) - 1 to 0
+        b = array.get(obBullBoxes, i)
+        if close < box.get_bottom(b)
+            box.delete(b)
+            array.remove(obBullBoxes, i)
+        else
+            box.set_right(b, bar_index + 3)
+            if low <= box.get_top(b)
+                inBullOB := true
+
+inBearOB = false
+if array.size(obBearBoxes) > 0
+    for i = array.size(obBearBoxes) - 1 to 0
+        b = array.get(obBearBoxes, i)
+        if close > box.get_top(b)
+            box.delete(b)
+            array.remove(obBearBoxes, i)
+        else
+            box.set_right(b, bar_index + 3)
+            if high >= box.get_bottom(b)
+                inBearOB := true
+
+//-----------------------------------------------------------------------------
+// ICT: Killzones
+//-----------------------------------------------------------------------------
+inNY = not na(time(timeframe.period, nySess, "America/New_York"))
+inLO = not na(time(timeframe.period, loSess, "Europe/London"))
+inKillzone = inNY or inLO
+
+bgcolor(showKZ and inNY ? nyCss : na, editable = false)
+bgcolor(showKZ and inLO ? loCss : na, editable = false)
+
+//-----------------------------------------------------------------------------
+// Confluence signals
+//-----------------------------------------------------------------------------
+bullZoneNow = inBullFVG or inBullOB
+bearZoneNow = inBearFVG or inBearOB
+
+barsSinceBullZone = ta.barssince(bullZoneNow)
+barsSinceBearZone = ta.barssince(bearZoneNow)
+bullZoneRecent = bullZoneNow or (not na(barsSinceBullZone) and barsSinceBullZone <= zoneLookback)
+bearZoneRecent = bearZoneNow or (not na(barsSinceBearZone) and barsSinceBearZone <= zoneLookback)
+
+buyTrigger  = wtCrossUp   and wtOversold
+sellTrigger = wtCrossDown and wtOverbought
+
+buySignal = buyTrigger
+     and (not useStructFilter or structBull)
+     and (not useZoneFilter   or bullZoneRecent)
+     and (not useMFFilter     or rsiMFI > 0)
+     and (not useKZFilter     or inKillzone)
+
+sellSignal = sellTrigger
+     and (not useStructFilter or structBear)
+     and (not useZoneFilter   or bearZoneRecent)
+     and (not useMFFilter     or rsiMFI < 0)
+     and (not useKZFilter     or inKillzone)
+
+strongBuy  = buySignal  and recentBullDiv
+strongSell = sellSignal and recentBearDiv
+
+//-----------------------------------------------------------------------------
+// Plots
+//-----------------------------------------------------------------------------
+plotshape(showWTdots and wtCrossUp   and wtOversold   , title = "WT cross up (raw)"  ,
+     style = shape.circle, location = location.belowbar, color = color.new(#00e676, 60), size = size.tiny)
+plotshape(showWTdots and wtCrossDown and wtOverbought , title = "WT cross down (raw)",
+     style = shape.circle, location = location.abovebar, color = color.new(#ff5252, 60), size = size.tiny)
+
+plotshape(buySignal and not strongBuy  , title = "Buy"        , text = "BUY" ,
+     style = shape.labelup  , location = location.belowbar,
+     color = color.new(#00e676, 0), textcolor = color.white, size = size.small)
+plotshape(strongBuy                    , title = "Strong Buy" , text = "BUY+",
+     style = shape.labelup  , location = location.belowbar,
+     color = color.new(#e2a400, 0), textcolor = color.black, size = size.small)
+
+plotshape(sellSignal and not strongSell, title = "Sell"       , text = "SELL",
+     style = shape.labeldown, location = location.abovebar,
+     color = color.new(#ff5252, 0), textcolor = color.white, size = size.small)
+plotshape(strongSell                   , title = "Strong Sell", text = "SELL+",
+     style = shape.labeldown, location = location.abovebar,
+     color = color.new(#e600e6, 0), textcolor = color.white, size = size.small)
+
+plotshape(wtBullDiv, title = "WT Bullish Divergence", style = shape.diamond,
+     location = location.belowbar, color = color.new(#00e676, 40), size = size.tiny, offset = -2)
+plotshape(wtBearDiv, title = "WT Bearish Divergence", style = shape.diamond,
+     location = location.abovebar, color = color.new(#ff5252, 40), size = size.tiny, offset = -2)
+
+//-----------------------------------------------------------------------------
+// Dashboard
+//-----------------------------------------------------------------------------
+var table dash = table.new(position.top_right, 2, 6, bgcolor = color.new(color.black, 30),
+     border_color = color.new(color.gray, 60), border_width = 1)
+
+if showDash and barstate.islast
+    upCol = color.new(#00e676, 0)
+    dnCol = color.new(#ff5252, 0)
+    nCol  = color.new(#b2b5be, 0)
+    table.cell(dash, 0, 0, "ICT+VMC"      , text_color = color.white, text_size = size.small)
+    table.cell(dash, 1, 0, ""             , text_color = color.white, text_size = size.small)
+    table.cell(dash, 0, 1, "Structure"    , text_color = nCol, text_size = size.tiny)
+    table.cell(dash, 1, 1, structBull ? "Bullish" : structBear ? "Bearish" : "Neutral",
+         text_color = structBull ? upCol : structBear ? dnCol : nCol, text_size = size.tiny)
+    table.cell(dash, 0, 2, "WaveTrend"    , text_color = nCol, text_size = size.tiny)
+    table.cell(dash, 1, 2, str.tostring(wt2, "#.##") + (wtOversold ? " OS" : wtOverbought ? " OB" : ""),
+         text_color = wtOversold ? upCol : wtOverbought ? dnCol : nCol, text_size = size.tiny)
+    table.cell(dash, 0, 3, "Money Flow"   , text_color = nCol, text_size = size.tiny)
+    table.cell(dash, 1, 3, rsiMFI > 0 ? "Positive" : "Negative",
+         text_color = rsiMFI > 0 ? upCol : dnCol, text_size = size.tiny)
+    table.cell(dash, 0, 4, "Bull zone"    , text_color = nCol, text_size = size.tiny)
+    table.cell(dash, 1, 4, bullZoneRecent ? "Active" : "-",
+         text_color = bullZoneRecent ? upCol : nCol, text_size = size.tiny)
+    table.cell(dash, 0, 5, "Bear zone"    , text_color = nCol, text_size = size.tiny)
+    table.cell(dash, 1, 5, bearZoneRecent ? "Active" : "-",
+         text_color = bearZoneRecent ? dnCol : nCol, text_size = size.tiny)
+
+//-----------------------------------------------------------------------------
+// Alerts
+//-----------------------------------------------------------------------------
+alertcondition(buySignal , "Buy signal"        , "ICT+VMC: Buy - WT oversold cross up with ICT confluence")
+alertcondition(strongBuy , "Strong Buy signal" , "ICT+VMC: STRONG Buy - confluence + bullish divergence")
+alertcondition(sellSignal, "Sell signal"       , "ICT+VMC: Sell - WT overbought cross down with ICT confluence")
+alertcondition(strongSell, "Strong Sell signal", "ICT+VMC: STRONG Sell - confluence + bearish divergence")
+alertcondition(buySignal or sellSignal, "Any signal", "ICT+VMC: Buy or Sell signal")
