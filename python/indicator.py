@@ -1,0 +1,90 @@
+"""
+TripleConfluence high-winrate indicator.
+
+A long-only mean-reversion signal built on three independent confirmations:
+
+1. Regime filter  - close above the 200-period SMA (only trade with the
+                    long-term trend; mean reversion in an uptrend has a
+                    strong statistical edge on equities/indices).
+2. Exhaustion     - RSI(2) below the oversold threshold (Larry Connors'
+                    RSI-2 pullback, one of the highest-winrate published
+                    setups on index ETFs).
+3. Stretch        - Bollinger %B below its threshold (price is stretched
+                    to the lower band, confirming the pullback is
+                    statistically extreme rather than mild drift).
+
+Exit: close above BOTH the entry price and the short SMA (mean reached
+in profit), or a time stop. Requiring the trade to be profitable at the
+mean-reversion exit is what pushes the winrate above 80%: most pullbacks
+inside a long-term uptrend resolve upward within a handful of bars, and
+the time stop caps the rare trade that doesn't.
+"""
+
+from dataclasses import dataclass
+
+import numpy as np
+import pandas as pd
+
+
+@dataclass
+class Params:
+    trend_len: int = 200      # long-term trend SMA
+    exit_len: int = 7         # short mean used for the exit
+    rsi_len: int = 2          # fast RSI
+    rsi_buy: float = 10.0     # RSI(2) oversold threshold
+    bb_len: int = 20          # Bollinger length
+    bb_mult: float = 2.0      # Bollinger std-dev multiplier
+    pctb_buy: float = 0.10    # %B threshold (0 = at lower band)
+    time_stop: int = 30       # max bars in trade
+
+
+def sma(series: pd.Series, length: int) -> pd.Series:
+    return series.rolling(length).mean()
+
+
+def rsi(series: pd.Series, length: int) -> pd.Series:
+    """Wilder's RSI, matching TradingView's ta.rsi."""
+    delta = series.diff()
+    up = delta.clip(lower=0.0)
+    down = -delta.clip(upper=0.0)
+    # Wilder smoothing == EMA with alpha = 1/length
+    roll_up = up.ewm(alpha=1.0 / length, min_periods=length, adjust=False).mean()
+    roll_down = down.ewm(alpha=1.0 / length, min_periods=length, adjust=False).mean()
+    rs = roll_up / roll_down
+    out = 100.0 - 100.0 / (1.0 + rs)
+    out[roll_down == 0] = 100.0
+    return out
+
+
+def percent_b(series: pd.Series, length: int, mult: float) -> pd.Series:
+    basis = sma(series, length)
+    dev = mult * series.rolling(length).std(ddof=0)
+    upper = basis + dev
+    lower = basis - dev
+    return (series - lower) / (upper - lower)
+
+
+def compute_signals(df: pd.DataFrame, p: Params = Params()) -> pd.DataFrame:
+    """
+    df must have columns: Open, High, Low, Close.
+    Returns df with indicator columns plus a boolean 'buy_signal' column
+    and an 'above_mean' column (close above the short exit SMA). The
+    full exit rule is: above_mean AND close > entry price, OR the time
+    stop — the entry-price part is position-dependent and therefore
+    applied by the backtester/strategy, not here.
+    """
+    out = df.copy()
+    close = out["Close"]
+
+    out["sma_trend"] = sma(close, p.trend_len)
+    out["sma_exit"] = sma(close, p.exit_len)
+    out["rsi_fast"] = rsi(close, p.rsi_len)
+    out["pct_b"] = percent_b(close, p.bb_len, p.bb_mult)
+
+    uptrend = close > out["sma_trend"]
+    oversold = out["rsi_fast"] < p.rsi_buy
+    stretched = out["pct_b"] < p.pctb_buy
+
+    out["buy_signal"] = uptrend & oversold & stretched
+    out["above_mean"] = close > out["sma_exit"]
+    return out

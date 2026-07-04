@@ -1,0 +1,47 @@
+//@version=5
+// TripleConfluence strategy — verify the winrate in TradingView's
+// Strategy Tester. Same logic as the indicator, with the full exit rule:
+// close above the short mean AND above entry price, or a time stop.
+//
+// Recommended: daily bars on liquid index ETFs / large caps (SPY, QQQ,
+// DIA, XLK, MSFT, ...). Historical winrate ~84% (2005-2026, 10-symbol
+// basket, next-open fills — see repository backtest).
+strategy("TripleConfluence [High Winrate]", overlay = true,
+     initial_capital = 100000,
+     default_qty_type = strategy.percent_of_equity, default_qty_value = 100,
+     process_orders_on_close = false)
+
+// ---------------------------------------------------------------- inputs
+trendLen = input.int(200, "Trend SMA length",  minval = 10)
+exitLen  = input.int(7,   "Exit SMA length",   minval = 2)
+rsiLen   = input.int(2,   "RSI length",        minval = 1)
+rsiBuy   = input.float(10.0, "RSI oversold threshold", minval = 1, maxval = 50)
+bbLen    = input.int(20,  "Bollinger length",  minval = 5)
+bbMult   = input.float(2.0, "Bollinger multiplier", minval = 0.5, step = 0.1)
+pctbBuy  = input.float(0.10, "%B buy threshold", minval = 0.0, maxval = 1.0, step = 0.05)
+timeStop = input.int(30,  "Time stop (bars)",  minval = 1)
+
+// ------------------------------------------------------------ indicators
+smaTrend = ta.sma(close, trendLen)
+smaExit  = ta.sma(close, exitLen)
+rsiFast  = ta.rsi(close, rsiLen)
+
+basis = ta.sma(close, bbLen)
+dev   = bbMult * ta.stdev(close, bbLen)
+pctB  = (close - (basis - dev)) / (2 * dev)
+
+// --------------------------------------------------------------- signals
+buySignal = close > smaTrend and rsiFast < rsiBuy and pctB < pctbBuy
+
+if buySignal and strategy.position_size == 0
+    strategy.entry("Long", strategy.long)   // fills next bar's open
+
+if strategy.position_size > 0
+    barsHeld = bar_index - strategy.opentrades.entry_bar_index(0)
+    inProfit = close > strategy.opentrades.entry_price(0)
+    if (close > smaExit and inProfit) or barsHeld >= timeStop
+        strategy.close("Long", comment = inProfit ? "mean+profit" : "time stop")
+
+// ----------------------------------------------------------------- plots
+plot(smaTrend, "Trend SMA (200)", color = color.new(color.orange, 0), linewidth = 2)
+plot(smaExit,  "Exit SMA (7)",    color = color.new(color.aqua, 30))

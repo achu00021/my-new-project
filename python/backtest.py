@@ -1,0 +1,122 @@
+"""
+Backtest the TripleConfluence indicator on real daily data (via yfinance)
+and report winrate, profit factor, and other stats per symbol.
+
+Usage:
+    python3 backtest.py                    # default symbol basket
+    python3 backtest.py SPY QQQ AAPL       # custom symbols
+
+Execution model (conservative, no lookahead):
+  - Signals are computed on bar close.
+  - Entries and exits fill on the NEXT bar's open.
+  - One position at a time, long only.
+"""
+
+import sys
+from dataclasses import dataclass
+
+import numpy as np
+import pandas as pd
+import yfinance as yf
+
+from indicator import Params, compute_signals
+
+DEFAULT_SYMBOLS = ["SPY", "QQQ", "DIA", "IWM", "AAPL", "MSFT", "GOOGL", "JNJ", "XLP", "GLD"]
+START = "2005-01-01"
+
+
+@dataclass
+class Trade:
+    entry_date: pd.Timestamp
+    exit_date: pd.Timestamp
+    entry: float
+    exit: float
+    bars_held: int
+
+    @property
+    def ret(self) -> float:
+        return self.exit / self.entry - 1.0
+
+
+def run_backtest(df: pd.DataFrame, p: Params = Params()) -> list[Trade]:
+    df = compute_signals(df, p)
+    opens = df["Open"].to_numpy()
+    closes = df["Close"].to_numpy()
+    buy = df["buy_signal"].to_numpy()
+    above_mean = df["above_mean"].to_numpy()
+    dates = df.index
+
+    trades: list[Trade] = []
+    in_pos = False
+    entry_i = -1
+    entry_px = np.nan
+
+    n = len(df)
+    for i in range(n - 1):
+        if not in_pos:
+            if buy[i]:
+                in_pos = True
+                entry_i = i + 1                # fill next open
+                entry_px = opens[i + 1]
+        else:
+            bars_held = i - entry_i
+            # Exit when the pullback has reverted (close above the short
+            # mean) AND the trade is in profit, or on the time stop.
+            take = above_mean[i] and closes[i] > entry_px
+            if i >= entry_i and (take or bars_held >= p.time_stop):
+                trades.append(
+                    Trade(dates[entry_i], dates[i + 1], entry_px, opens[i + 1], bars_held + 1)
+                )
+                in_pos = False
+    return trades
+
+
+def stats(trades: list[Trade]) -> dict:
+    if not trades:
+        return {"trades": 0}
+    rets = np.array([t.ret for t in trades])
+    wins = rets > 0
+    gross_win = rets[wins].sum()
+    gross_loss = -rets[~wins].sum()
+    return {
+        "trades": len(trades),
+        "winrate": wins.mean() * 100,
+        "avg_ret": rets.mean() * 100,
+        "profit_factor": gross_win / gross_loss if gross_loss > 0 else float("inf"),
+        "avg_bars": np.mean([t.bars_held for t in trades]),
+        "worst": rets.min() * 100,
+    }
+
+
+def main() -> None:
+    symbols = sys.argv[1:] or DEFAULT_SYMBOLS
+    print(f"{'symbol':<8}{'trades':>8}{'winrate%':>10}{'avg_ret%':>10}"
+          f"{'PF':>8}{'avg_bars':>10}{'worst%':>9}")
+    print("-" * 63)
+
+    all_trades: list[Trade] = []
+    for sym in symbols:
+        df = yf.download(sym, start=START, auto_adjust=True, progress=False)
+        if df is None or df.empty:
+            print(f"{sym:<8}  no data")
+            continue
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        trades = run_backtest(df)
+        all_trades.extend(trades)
+        s = stats(trades)
+        if s["trades"] == 0:
+            print(f"{sym:<8}{0:>8}")
+            continue
+        print(f"{sym:<8}{s['trades']:>8}{s['winrate']:>10.1f}{s['avg_ret']:>10.2f}"
+              f"{s['profit_factor']:>8.2f}{s['avg_bars']:>10.1f}{s['worst']:>9.2f}")
+
+    if all_trades:
+        s = stats(all_trades)
+        print("-" * 63)
+        print(f"{'ALL':<8}{s['trades']:>8}{s['winrate']:>10.1f}{s['avg_ret']:>10.2f}"
+              f"{s['profit_factor']:>8.2f}{s['avg_bars']:>10.1f}{s['worst']:>9.2f}")
+
+
+if __name__ == "__main__":
+    main()
