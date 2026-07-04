@@ -137,8 +137,14 @@ alertOnFade   = input.bool(false, 'Alert: Fade Warnings',   group = grpAlr,
 // --- Winrate table ---
 grpTbl = 'Winrate Table'
 showWinTable = input.bool(true, 'Show Signal Winrate Table', group = grpTbl)
-winHorizon   = input.int(20, 'Evaluation Horizon (bars)', minval = 1, group = grpTbl,
-     tooltip = 'A buy signal counts as a win if price closes higher this many bars later (lower for sells). This measures raw signal quality on the current chart; use the strategy script for winrate with stops/targets.')
+evalModeStr  = input.string('ATR Stop/Target', 'Evaluation Mode', options = ['ATR Stop/Target', 'Fixed Horizon'], group = grpTbl,
+     tooltip = 'ATR Stop/Target: each signal is scored by which bracket level is touched first — take profit (win) or stop loss (loss) — exactly like a real bracket order. Matches the strategy script. Fixed Horizon: a signal wins if price simply closed favorably N bars later.')
+tblAtrStop   = input.float(2.0, 'Table: Stop Loss (ATR multiple)',   minval = 0.25, step = 0.25, group = grpTbl)
+tblAtrTgt    = input.float(2.0, 'Table: Take Profit (ATR multiple)', minval = 0.25, step = 0.25, group = grpTbl)
+tblTimeout   = input.int(100, 'Table: Max Bars Per Trade (timeout)', minval = 5, group = grpTbl,
+     tooltip = 'If neither the stop nor the target is touched within this many bars, the trade is scored at the current close.')
+winHorizon   = input.int(20, 'Fixed Horizon (bars)', minval = 1, group = grpTbl,
+     tooltip = 'Used only in Fixed Horizon mode: a buy wins if price closes higher this many bars later (lower for sells).')
 tblPosStr    = input.string('Top Right', 'Table Position', options = ['Top Right', 'Top Left', 'Bottom Right', 'Bottom Left'], group = grpTbl)
 
 // ============================================================================
@@ -429,9 +435,12 @@ if barstate.isconfirmed
 
 // ============================================================================
 // SIGNAL WINRATE TABLE
-// Each signal is evaluated exactly once, `winHorizon` bars after it fired:
-// a buy wins if close is above the signal close, a sell wins if below.
-// This measures raw signal quality on the visible chart history.
+// Two evaluation modes:
+//  - ATR Stop/Target: each signal is tracked like a real bracket order from
+//    the signal close. Win = take profit touched first, loss = stop touched
+//    first (if both are touched in the same bar, the stop wins — worst case).
+//    This matches the strategy script's SL/TP behaviour.
+//  - Fixed Horizon: win = price closed favorably `winHorizon` bars later.
 // ============================================================================
 
 f_tablePos(simple string s) =>
@@ -441,6 +450,8 @@ f_tablePos(simple string s) =>
         'Bottom Right' => position.bottom_right
         => position.bottom_left
 
+useTpslMode = evalModeStr == 'ATR Stop/Target'
+
 var int   buyCount   = 0
 var int   buyWins    = 0
 var float buySumRet  = 0.0
@@ -448,18 +459,69 @@ var int   sellCount  = 0
 var int   sellWins   = 0
 var float sellSumRet = 0.0
 
-// A signal that fired `winHorizon` bars ago is now mature: score it.
-if contrarianBuy[winHorizon]
+// --- Fixed Horizon mode: a signal that fired `winHorizon` bars ago matures now
+if not useTpslMode and contrarianBuy[winHorizon]
     retPct = (close - close[winHorizon]) / close[winHorizon] * 100
     buyCount  := buyCount + 1
     buyWins   := buyWins + (retPct > 0 ? 1 : 0)
     buySumRet := buySumRet + retPct
 
-if contrarianSell[winHorizon]
+if not useTpslMode and contrarianSell[winHorizon]
     retPct = (close[winHorizon] - close) / close[winHorizon] * 100
     sellCount  := sellCount + 1
     sellWins   := sellWins + (retPct > 0 ? 1 : 0)
     sellSumRet := sellSumRet + retPct
+
+// --- ATR Stop/Target mode: track open simulated brackets until resolved
+var array<float> pendEntry = array.new_float()
+var array<float> pendStop  = array.new_float()
+var array<float> pendTgt   = array.new_float()
+var array<int>   pendDir   = array.new_int()   // 1 = long, -1 = short
+var array<int>   pendBar   = array.new_int()
+
+if useTpslMode
+    if contrarianBuy
+        array.push(pendEntry, close)
+        array.push(pendStop,  close - tblAtrStop * atrVal)
+        array.push(pendTgt,   close + tblAtrTgt  * atrVal)
+        array.push(pendDir,   1)
+        array.push(pendBar,   bar_index)
+    if contrarianSell
+        array.push(pendEntry, close)
+        array.push(pendStop,  close + tblAtrStop * atrVal)
+        array.push(pendTgt,   close - tblAtrTgt  * atrVal)
+        array.push(pendDir,   -1)
+        array.push(pendBar,   bar_index)
+
+    if array.size(pendDir) > 0
+        for i = array.size(pendDir) - 1 to 0
+            // Entry is at the signal bar close; start checking from the next bar
+            if bar_index > array.get(pendBar, i)
+                dir    = array.get(pendDir, i)
+                entryP = array.get(pendEntry, i)
+                stopP  = array.get(pendStop, i)
+                tgtP   = array.get(pendTgt, i)
+                hitStop  = dir == 1 ? low  <= stopP : high >= stopP
+                hitTgt   = dir == 1 ? high >= tgtP  : low  <= tgtP
+                timedOut = bar_index - array.get(pendBar, i) >= tblTimeout
+                if hitStop or hitTgt or timedOut
+                    // Stop checked before target: same-bar ties count as losses (conservative)
+                    exitP  = hitStop ? stopP : hitTgt ? tgtP : close
+                    retPct = dir == 1 ? (exitP - entryP) / entryP * 100 : (entryP - exitP) / entryP * 100
+                    isWin  = hitStop ? false : hitTgt ? true : retPct > 0
+                    if dir == 1
+                        buyCount  := buyCount + 1
+                        buyWins   := buyWins + (isWin ? 1 : 0)
+                        buySumRet := buySumRet + retPct
+                    else
+                        sellCount  := sellCount + 1
+                        sellWins   := sellWins + (isWin ? 1 : 0)
+                        sellSumRet := sellSumRet + retPct
+                    array.remove(pendEntry, i)
+                    array.remove(pendStop, i)
+                    array.remove(pendTgt, i)
+                    array.remove(pendDir, i)
+                    array.remove(pendBar, i)
 
 var table winTable = table.new(f_tablePos(tblPosStr), 4, 4, bgcolor = color.new(#1e222d, 15), border_width = 1, border_color = color.new(#434651, 50))
 
@@ -476,7 +538,8 @@ if showWinTable and barstate.islast
     lossCol = color.new(#ff5252, 0)
     totalCount = buyCount + sellCount
     totalWins  = buyWins + sellWins
-    table.cell(winTable, 0, 0, 'Signal (' + str.tostring(winHorizon) + ' bars)', text_color = hdrCol, text_size = size.small)
+    tblHdr = useTpslMode ? 'Signal (SL ' + str.tostring(tblAtrStop, '#.##') + ' / TP ' + str.tostring(tblAtrTgt, '#.##') + ' ATR)' : 'Signal (' + str.tostring(winHorizon) + ' bars)'
+    table.cell(winTable, 0, 0, tblHdr, text_color = hdrCol, text_size = size.small)
     table.cell(winTable, 1, 0, 'Count',   text_color = hdrCol, text_size = size.small)
     table.cell(winTable, 2, 0, 'Winrate', text_color = hdrCol, text_size = size.small)
     table.cell(winTable, 3, 0, 'Avg Ret', text_color = hdrCol, text_size = size.small)
