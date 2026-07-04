@@ -1,0 +1,759 @@
+// This work is licensed under a Attribution-NonCommercial-ShareAlike 4.0 International (CC BY-NC-SA 4.0)
+// https://creativecommons.org/licenses/by-nc-sa/4.0/
+// Combines concepts from "ICT Concepts [LuxAlgo]" (© LuxAlgo) and
+// "VuManChu B Divergences" (© VuManChu) into a single confluence signal indicator.
+//
+// HOW IT INCREASES WINRATE
+// ------------------------
+// Instead of taking every WaveTrend cross (VuManChu) or trading every ICT zone,
+// a BUY prints only when several independent conditions agree:
+//   1. WaveTrend crosses UP while oversold            (momentum trigger - VMC)
+//   2. Market structure is bullish (MSS/BOS up)       (trend filter     - ICT)
+//   3. Price is inside / just tapped a bullish FVG
+//      or bullish Order Block                         (location filter  - ICT)
+//   4. Money Flow (RSI+MFI area) is positive          (flow filter      - VMC)
+//   5. (Optional) Inside a Killzone session           (time filter      - ICT)
+// A STRONG BUY additionally requires a recent bullish WaveTrend divergence.
+// SELL signals mirror the logic. Every filter can be toggled off.
+//
+// SCALP MODE
+// ----------
+// Scalp Mode fires multiple stacked entries along a move using a looser
+// WaveTrend trigger while keeping the ICT structure/zone/flow filters.
+// Each entry is tracked individually with a take profit of at least the
+// "Min profit per entry (%)" input (default 0.3%) and its own stop loss.
+// Entry / TP / SL lines are drawn per entry and the dashboard shows open
+// scalps, wins/losses and the live winrate.
+//
+// VMC+ OSCILLATOR UPGRADES (entry & profit accuracy)
+// --------------------------------------------------
+// 1. HTF WaveTrend confirmation - entries must agree with the WaveTrend
+//    direction on a higher timeframe (like VMC's Sommi flag idea).
+// 2. Stoch RSI confirmation     - longs need Stoch RSI K above D or deeply
+//    oversold; shorts mirrored (from the original Cipher B).
+// 3. RSI exhaustion filter      - no longs into overbought RSI, no shorts
+//    into oversold RSI.
+// 4. WT momentum + candle       - the WaveTrend fast line must be turning in
+//    the trade direction and the signal candle must close in that direction.
+// 5. ATR-adaptive TP/SL         - targets expand with volatility so profits
+//    match market conditions, but the TP never drops below the min profit %.
+// 6. Breakeven stop             - once price covers 50% of the target, the
+//    stop moves to entry so a winner cannot become a loser (counted as "BE").
+//
+// WINRATE BOOST
+// -------------
+// 1. EMA trend filter    - longs only above the trend EMA, shorts only below,
+//    so every trade is with the dominant flow.
+// 2. ADX chop filter     - entries are skipped when ADX is below the minimum:
+//    ranging, directionless markets are where momentum entries lose most.
+// 3. Volume confirmation - optional: the signal bar needs above-average volume.
+// 4. Loss-streak pause   - after N consecutive stop-outs, scalp entries pause
+//    for a number of bars; losing streaks usually mean the regime changed.
+
+//@version=5
+indicator("ICT + VMC Confluence Signals", shorttitle = "ICT+VMC Signals",
+     overlay = true, max_boxes_count = 500, max_lines_count = 500, max_labels_count = 500)
+
+//-----------------------------------------------------------------------------
+// Inputs
+//-----------------------------------------------------------------------------
+grpSig  = "Signals"
+useStructFilter = input.bool(true , "Require Market Structure agreement", group = grpSig)
+useZoneFilter   = input.bool(true , "Require FVG / Order Block zone"    , group = grpSig)
+useMFFilter     = input.bool(true , "Require Money Flow agreement"      , group = grpSig)
+useKZFilter     = input.bool(false, "Require Killzone session"          , group = grpSig)
+zoneLookback    = input.int (5    , "Zone tap lookback (bars)"          , minval = 0, maxval = 20 , group = grpSig)
+divLookback     = input.int (8    , "Divergence lookback (bars)"        , minval = 1, maxval = 30 , group = grpSig)
+
+grpWT   = "WaveTrend (VuManChu)"
+wtChannelLen = input.int   (9   , "WT Channel Length" , group = grpWT)
+wtAverageLen = input.int   (12  , "WT Average Length" , group = grpWT)
+wtMASource   = input.source(hlc3, "WT MA Source"      , group = grpWT)
+wtMALen      = input.int   (3   , "WT MA Length"      , group = grpWT)
+obLevel      = input.int   (53  , "WT Overbought Level", group = grpWT)
+osLevel      = input.int   (-53 , "WT Oversold Level"  , group = grpWT)
+wtDivOBLevel = input.int   (45  , "WT Bearish Div min" , group = grpWT)
+wtDivOSLevel = input.int   (-65 , "WT Bullish Div min" , group = grpWT)
+
+grpMF   = "Money Flow (VuManChu)"
+mfPeriod     = input.int  (60 , "MFI Period"          , group = grpMF)
+mfMultiplier = input.float(150, "MFI Area multiplier" , group = grpMF)
+
+grpMS   = "Market Structure (ICT)"
+showMS  = input.bool (true, "Show MSS / BOS lines" , group = grpMS)
+msLen   = input.int  (5   , "Structure Length"     , minval = 3, maxval = 20, group = grpMS)
+cBull   = input.color(color.new(#00e6a1, 0), "Bullish", inline = "msc", group = grpMS)
+cBear   = input.color(color.new(#e60400, 0), "Bearish", inline = "msc", group = grpMS)
+
+grpFVG  = "Fair Value Gaps (ICT)"
+showFVG = input.bool (true, "Show FVGs"            , group = grpFVG)
+maxFVG  = input.int  (4   , "Max FVGs per side"    , minval = 1, maxval = 10, group = grpFVG)
+cFVGbl  = input.color(color.new(#00e676, 80), "Bullish FVG", inline = "fvgc", group = grpFVG)
+cFVGbr  = input.color(color.new(#ff5252, 80), "Bearish FVG", inline = "fvgc", group = grpFVG)
+
+grpOB   = "Order Blocks (ICT)"
+showOB  = input.bool (true, "Show Order Blocks"    , group = grpOB)
+obSwingLen = input.int(10 , "Swing Lookback"       , minval = 3, maxval = 30, group = grpOB)
+maxOB   = input.int  (3   , "Max OBs per side"     , minval = 1, maxval = 10, group = grpOB)
+cOBbl   = input.color(color.new(#3e89fa, 75), "Bullish OB", inline = "obc", group = grpOB)
+cOBbr   = input.color(color.new(#ff3131, 75), "Bearish OB", inline = "obc", group = grpOB)
+
+grpKZ   = "Killzones (ICT)"
+showKZ  = input.bool   (false       , "Show Killzone background", group = grpKZ)
+nySess  = input.session("0700-0900" , "New York (NY time)"      , group = grpKZ)
+loSess  = input.session("0700-1000" , "London Open (London time)", group = grpKZ)
+nyCss   = input.color  (color.new(#ff5d00, 93), "NY color"     , group = grpKZ)
+loCss   = input.color  (color.new(#00bcd4, 93), "London color" , group = grpKZ)
+
+grpSC   = "Scalp Mode"
+enableScalp    = input.bool (true , "Enable scalp entries"                      , group = grpSC)
+scalpTPpct     = input.float(0.3  , "Min profit per entry (%)"                  , minval = 0.3, maxval = 5 , step = 0.1 , group = grpSC)
+scalpSLpct     = input.float(0.45 , "Stop loss per entry (%)"                   , minval = 0.1, maxval = 10, step = 0.05, group = grpSC)
+scalpMaxOpen   = input.int  (3    , "Max simultaneous entries per side"         , minval = 1  , maxval = 10, group = grpSC)
+scalpSpacing   = input.int  (3    , "Min bars between entries"                  , minval = 1  , maxval = 50, group = grpSC)
+scalpWTLevel   = input.int  (0    , "Scalp WT level (long below / short above)" , group = grpSC)
+showScalpLines = input.bool (true , "Show entry / TP / SL lines"                , group = grpSC)
+
+grpVX   = "VMC+ Oscillator Upgrades"
+useHTFFilter   = input.bool     (true , "HTF WaveTrend confirmation"                , group = grpVX)
+htfTF          = input.timeframe("60" , "HTF timeframe"                             , group = grpVX)
+useStochFilter = input.bool     (true , "Stoch RSI confirmation"                    , group = grpVX)
+useRSIFilter   = input.bool     (true , "RSI exhaustion filter"                     , group = grpVX)
+useMomFilter   = input.bool     (true , "WT momentum + candle direction"            , group = grpVX)
+useAdaptiveTP  = input.bool     (true , "ATR-adaptive TP/SL (never below min %)"    , group = grpVX)
+atrLen         = input.int      (14   , "ATR length"          , minval = 1          , group = grpVX)
+atrTPmult      = input.float    (1.2  , "ATR TP multiplier"   , minval = 0.1, step = 0.1, group = grpVX)
+atrSLmult      = input.float    (0.8  , "ATR SL multiplier"   , minval = 0.1, step = 0.1, group = grpVX)
+useBreakeven   = input.bool     (true , "Move stop to breakeven at 50% of TP"       , group = grpVX)
+
+grpWB   = "Winrate Boost"
+useTrendEMA   = input.bool(true , "EMA trend filter (long above / short below)", group = grpWB)
+emaLen        = input.int (200  , "Trend EMA length"                   , minval = 10, maxval = 500, group = grpWB)
+useADXFilter  = input.bool(true , "ADX chop filter (skip ranging markets)"      , group = grpWB)
+adxThresh     = input.int (20   , "Min ADX"                            , minval = 5 , maxval = 50 , group = grpWB)
+useVolFilter  = input.bool(false, "Volume confirmation (above average)"         , group = grpWB)
+volLen        = input.int (20   , "Volume SMA length"                  , minval = 1 , maxval = 100, group = grpWB)
+usePause      = input.bool(true , "Pause scalps after consecutive losses"       , group = grpWB)
+maxLossStreak = input.int (2    , "Losses before pause"                , minval = 1 , maxval = 10 , group = grpWB)
+pauseBars     = input.int (20   , "Pause duration (bars)"              , minval = 1 , maxval = 200, group = grpWB)
+
+grpUI   = "Display"
+showDash    = input.bool(true, "Show dashboard"        , group = grpUI)
+showWTdots  = input.bool(true, "Show raw WT cross dots", group = grpUI)
+
+//-----------------------------------------------------------------------------
+// VuManChu components (ported to v5)
+//-----------------------------------------------------------------------------
+// WaveTrend
+esa = ta.ema(wtMASource, wtChannelLen)
+de  = ta.ema(math.abs(wtMASource - esa), wtChannelLen)
+ci  = (wtMASource - esa) / (0.015 * de)
+wt1 = ta.ema(ci, wtAverageLen)
+wt2 = ta.sma(wt1, wtMALen)
+
+wtCrossUp   = ta.crossover (wt1, wt2)
+wtCrossDown = ta.crossunder(wt1, wt2)
+wtOversold   = wt2 <= osLevel
+wtOverbought = wt2 >= obLevel
+
+// Money Flow (RSI+MFI area)
+mfRange = high - low == 0 ? syminfo.mintick : high - low
+rsiMFI  = ta.sma((close - open) / mfRange * mfMultiplier, mfPeriod)
+
+// WaveTrend divergences (fractal based)
+fractalTopRaw = wt2[4] < wt2[2] and wt2[3] < wt2[2] and wt2[2] > wt2[1] and wt2[2] > wt2
+fractalBotRaw = wt2[4] > wt2[2] and wt2[3] > wt2[2] and wt2[2] < wt2[1] and wt2[2] < wt2
+fractalTop    = fractalTopRaw and wt2[2] >= wtDivOBLevel
+fractalBot    = fractalBotRaw and wt2[2] <= wtDivOSLevel
+
+prevTopWT  = ta.valuewhen(fractalTop, wt2[2] , 1)
+prevTopPx  = ta.valuewhen(fractalTop, high[2], 1)
+prevBotWT  = ta.valuewhen(fractalBot, wt2[2] , 1)
+prevBotPx  = ta.valuewhen(fractalBot, low[2] , 1)
+
+wtBearDiv = fractalTop and high[2] > prevTopPx and wt2[2] < prevTopWT
+wtBullDiv = fractalBot and low[2]  < prevBotPx and wt2[2] > prevBotWT
+
+barsSinceBullDiv = ta.barssince(wtBullDiv)
+barsSinceBearDiv = ta.barssince(wtBearDiv)
+recentBullDiv = not na(barsSinceBullDiv) and barsSinceBullDiv <= divLookback
+recentBearDiv = not na(barsSinceBearDiv) and barsSinceBearDiv <= divLookback
+
+//-----------------------------------------------------------------------------
+// VMC+ Oscillator Upgrades
+//-----------------------------------------------------------------------------
+// RSI + Stoch RSI (from the original Cipher B)
+rsiVal = ta.rsi(close, 14)
+stK    = ta.sma(ta.stoch(rsiVal, rsiVal, rsiVal, 14), 3)
+stD    = ta.sma(stK, 3)
+
+// Higher timeframe WaveTrend (Sommi-style trend agreement)
+htfWt2 = request.security(syminfo.tickerid, htfTF, wt2, gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off)
+
+htfLongOK    = not useHTFFilter   or htfWt2 <= 0 or htfWt2 > htfWt2[2]
+htfShortOK   = not useHTFFilter   or htfWt2 >= 0 or htfWt2 < htfWt2[2]
+stochLongOK  = not useStochFilter or stK > stD or stK < 20
+stochShortOK = not useStochFilter or stK < stD or stK > 80
+rsiLongOK    = not useRSIFilter   or rsiVal < 70
+rsiShortOK   = not useRSIFilter   or rsiVal > 30
+momLongOK    = not useMomFilter   or (wt1 > wt1[1] and close > open)
+momShortOK   = not useMomFilter   or (wt1 < wt1[1] and close < open)
+
+oscLongOK  = htfLongOK  and stochLongOK  and rsiLongOK  and momLongOK
+oscShortOK = htfShortOK and stochShortOK and rsiShortOK and momShortOK
+
+// ATR-adaptive TP/SL: expands with volatility, never below the min profit %
+atrPct   = ta.atr(atrLen) / close * 100
+tpPctEff = useAdaptiveTP ? math.max(scalpTPpct, atrPct * atrTPmult) : scalpTPpct
+slPctEff = useAdaptiveTP ? math.max(scalpSLpct, atrPct * atrSLmult) : scalpSLpct
+
+//-----------------------------------------------------------------------------
+// Winrate Boost filters
+//-----------------------------------------------------------------------------
+emaTrend = ta.ema(close, emaLen)
+[diPlus, diMinus, adxVal] = ta.dmi(14, 14)
+volMA = ta.sma(volume, volLen)
+
+adxOK        = not useADXFilter or adxVal >= adxThresh
+volOK        = not useVolFilter or volume > volMA
+trendLongOK  = not useTrendEMA  or close > emaTrend
+trendShortOK = not useTrendEMA  or close < emaTrend
+
+boostLongOK  = trendLongOK  and adxOK and volOK
+boostShortOK = trendShortOK and adxOK and volOK
+
+//-----------------------------------------------------------------------------
+// ICT: Market Structure (MSS / BOS)
+//-----------------------------------------------------------------------------
+var float lastSwingHi  = na
+var int   lastSwingHiX = na
+var bool  swingHiUsed  = false
+var float lastSwingLo  = na
+var int   lastSwingLoX = na
+var bool  swingLoUsed  = false
+var int   msTrend      = 0
+
+ph = ta.pivothigh(high, msLen, msLen)
+pl = ta.pivotlow (low , msLen, msLen)
+
+if not na(ph)
+    lastSwingHi  := ph
+    lastSwingHiX := bar_index - msLen
+    swingHiUsed  := false
+if not na(pl)
+    lastSwingLo  := pl
+    lastSwingLoX := bar_index - msLen
+    swingLoUsed  := false
+
+bullBreak = not na(lastSwingHi) and not swingHiUsed and close > lastSwingHi
+bearBreak = not na(lastSwingLo) and not swingLoUsed and close < lastSwingLo
+
+mssBull = bullBreak and msTrend <= 0
+mssBear = bearBreak and msTrend >= 0
+
+if bullBreak
+    if showMS
+        line.new(lastSwingHiX, lastSwingHi, bar_index, lastSwingHi,
+             color = cBull, style = mssBull ? line.style_solid : line.style_dotted)
+        label.new(int(math.avg(lastSwingHiX, bar_index)), lastSwingHi,
+             text = mssBull ? "MSS" : "BOS", style = label.style_label_down,
+             color = color(na), textcolor = cBull, size = size.tiny)
+    swingHiUsed := true
+    msTrend     := 1
+
+if bearBreak
+    if showMS
+        line.new(lastSwingLoX, lastSwingLo, bar_index, lastSwingLo,
+             color = cBear, style = mssBear ? line.style_solid : line.style_dotted)
+        label.new(int(math.avg(lastSwingLoX, bar_index)), lastSwingLo,
+             text = mssBear ? "MSS" : "BOS", style = label.style_label_up,
+             color = color(na), textcolor = cBear, size = size.tiny)
+    swingLoUsed := true
+    msTrend     := -1
+
+structBull = msTrend == 1
+structBear = msTrend == -1
+
+//-----------------------------------------------------------------------------
+// ICT: Fair Value Gaps
+//-----------------------------------------------------------------------------
+var box[] fvgBullBoxes = array.new<box>()
+var box[] fvgBearBoxes = array.new<box>()
+
+bullFVG = low  > high[2] and close[1] > open[1]
+bearFVG = high < low[2]  and close[1] < open[1]
+
+if bullFVG
+    b = box.new(bar_index - 2, low, bar_index, high[2],
+         bgcolor = showFVG ? cFVGbl : color(na), border_color = showFVG ? cFVGbl : color(na),
+         text = showFVG ? "FVG" : "", text_size = size.tiny, text_color = showFVG ? cFVGbl : color(na))
+    array.unshift(fvgBullBoxes, b)
+    if array.size(fvgBullBoxes) > maxFVG
+        box.delete(array.pop(fvgBullBoxes))
+
+if bearFVG
+    b = box.new(bar_index - 2, low[2], bar_index, high,
+         bgcolor = showFVG ? cFVGbr : color(na), border_color = showFVG ? cFVGbr : color(na),
+         text = showFVG ? "FVG" : "", text_size = size.tiny, text_color = showFVG ? cFVGbr : color(na))
+    array.unshift(fvgBearBoxes, b)
+    if array.size(fvgBearBoxes) > maxFVG
+        box.delete(array.pop(fvgBearBoxes))
+
+// Manage bullish FVGs: extend while valid, remove once fully traded through
+inBullFVG = false
+if array.size(fvgBullBoxes) > 0
+    for i = array.size(fvgBullBoxes) - 1 to 0
+        b = array.get(fvgBullBoxes, i)
+        if low < box.get_bottom(b)
+            box.delete(b)
+            array.remove(fvgBullBoxes, i)
+        else
+            box.set_right(b, bar_index + 3)
+            if low <= box.get_top(b)
+                inBullFVG := true
+
+inBearFVG = false
+if array.size(fvgBearBoxes) > 0
+    for i = array.size(fvgBearBoxes) - 1 to 0
+        b = array.get(fvgBearBoxes, i)
+        if high > box.get_top(b)
+            box.delete(b)
+            array.remove(fvgBearBoxes, i)
+        else
+            box.set_right(b, bar_index + 3)
+            if high >= box.get_bottom(b)
+                inBearFVG := true
+
+//-----------------------------------------------------------------------------
+// ICT: Order Blocks (swing based)
+//-----------------------------------------------------------------------------
+var int   obOs        = 0
+var float obTopY      = na
+var int   obTopX      = na
+var bool  obTopUsed   = true
+var float obBtmY      = na
+var int   obBtmX      = na
+var bool  obBtmUsed   = true
+
+upperSw = ta.highest(high, obSwingLen)
+lowerSw = ta.lowest (low , obSwingLen)
+obOs := high[obSwingLen] > upperSw ? 0 : low[obSwingLen] < lowerSw ? 1 : obOs
+
+if obOs == 0 and obOs[1] != 0
+    obTopY    := high[obSwingLen]
+    obTopX    := bar_index - obSwingLen
+    obTopUsed := false
+if obOs == 1 and obOs[1] != 1
+    obBtmY    := low[obSwingLen]
+    obBtmX    := bar_index - obSwingLen
+    obBtmUsed := false
+
+var box[] obBullBoxes = array.new<box>()
+var box[] obBearBoxes = array.new<box>()
+
+// Bullish OB: swing high broken up -> lowest candle of the leg is demand
+if not obTopUsed and close > obTopY
+    obTopUsed := true
+    minLow   = low[1]
+    maxOfBar = math.max(close[1], open[1])
+    leftX    = bar_index - 1
+    span     = bar_index - obTopX - 1
+    if span >= 1
+        for i = 1 to span
+            if low[i] < minLow
+                minLow   := low[i]
+                maxOfBar := math.max(close[i], open[i])
+                leftX    := bar_index - i
+    b = box.new(leftX, maxOfBar, bar_index + 3, minLow,
+         bgcolor = showOB ? cOBbl : color(na), border_color = showOB ? cOBbl : color(na),
+         text = showOB ? "+OB" : "", text_size = size.tiny, text_color = showOB ? cOBbl : color(na))
+    array.unshift(obBullBoxes, b)
+    if array.size(obBullBoxes) > maxOB
+        box.delete(array.pop(obBullBoxes))
+
+// Bearish OB: swing low broken down -> highest candle of the leg is supply
+if not obBtmUsed and close < obBtmY
+    obBtmUsed := true
+    maxHigh  = high[1]
+    minOfBar = math.min(close[1], open[1])
+    leftX    = bar_index - 1
+    span     = bar_index - obBtmX - 1
+    if span >= 1
+        for i = 1 to span
+            if high[i] > maxHigh
+                maxHigh  := high[i]
+                minOfBar := math.min(close[i], open[i])
+                leftX    := bar_index - i
+    b = box.new(leftX, maxHigh, bar_index + 3, minOfBar,
+         bgcolor = showOB ? cOBbr : color(na), border_color = showOB ? cOBbr : color(na),
+         text = showOB ? "-OB" : "", text_size = size.tiny, text_color = showOB ? cOBbr : color(na))
+    array.unshift(obBearBoxes, b)
+    if array.size(obBearBoxes) > maxOB
+        box.delete(array.pop(obBearBoxes))
+
+inBullOB = false
+if array.size(obBullBoxes) > 0
+    for i = array.size(obBullBoxes) - 1 to 0
+        b = array.get(obBullBoxes, i)
+        if close < box.get_bottom(b)
+            box.delete(b)
+            array.remove(obBullBoxes, i)
+        else
+            box.set_right(b, bar_index + 3)
+            if low <= box.get_top(b)
+                inBullOB := true
+
+inBearOB = false
+if array.size(obBearBoxes) > 0
+    for i = array.size(obBearBoxes) - 1 to 0
+        b = array.get(obBearBoxes, i)
+        if close > box.get_top(b)
+            box.delete(b)
+            array.remove(obBearBoxes, i)
+        else
+            box.set_right(b, bar_index + 3)
+            if high >= box.get_bottom(b)
+                inBearOB := true
+
+//-----------------------------------------------------------------------------
+// ICT: Killzones
+//-----------------------------------------------------------------------------
+inNY = not na(time(timeframe.period, nySess, "America/New_York"))
+inLO = not na(time(timeframe.period, loSess, "Europe/London"))
+inKillzone = inNY or inLO
+
+bgcolor(showKZ and inNY ? nyCss : na, editable = false)
+bgcolor(showKZ and inLO ? loCss : na, editable = false)
+
+//-----------------------------------------------------------------------------
+// Confluence signals
+//-----------------------------------------------------------------------------
+bullZoneNow = inBullFVG or inBullOB
+bearZoneNow = inBearFVG or inBearOB
+
+barsSinceBullZone = ta.barssince(bullZoneNow)
+barsSinceBearZone = ta.barssince(bearZoneNow)
+bullZoneRecent = bullZoneNow or (not na(barsSinceBullZone) and barsSinceBullZone <= zoneLookback)
+bearZoneRecent = bearZoneNow or (not na(barsSinceBearZone) and barsSinceBearZone <= zoneLookback)
+
+buyTrigger  = wtCrossUp   and wtOversold
+sellTrigger = wtCrossDown and wtOverbought
+
+buySignal = buyTrigger
+     and (not useStructFilter or structBull)
+     and (not useZoneFilter   or bullZoneRecent)
+     and (not useMFFilter     or rsiMFI > 0)
+     and (not useKZFilter     or inKillzone)
+     and oscLongOK
+     and boostLongOK
+
+sellSignal = sellTrigger
+     and (not useStructFilter or structBear)
+     and (not useZoneFilter   or bearZoneRecent)
+     and (not useMFFilter     or rsiMFI < 0)
+     and (not useKZFilter     or inKillzone)
+     and oscShortOK
+     and boostShortOK
+
+strongBuy  = buySignal  and recentBullDiv
+strongSell = sellSignal and recentBearDiv
+
+//-----------------------------------------------------------------------------
+// Scalp Mode - multiple entries, each targeting at least the min profit %
+//-----------------------------------------------------------------------------
+// A scalp entry uses a looser momentum trigger (any WT cross below/above the
+// scalp level instead of full oversold/overbought) but keeps the ICT filters
+// and the VMC+ oscillator confirmations, so several entries can stack along
+// one move. Each entry stores its own TP/SL: with ATR-adaptive mode the TP
+// grows with volatility but never drops below the min profit % input.
+
+var float[] sLongEntry  = array.new<float>()
+var int[]   sLongBar    = array.new<int>()
+var float[] sLongTPv    = array.new<float>()
+var float[] sLongSLv    = array.new<float>()
+var line[]  sLongEnLn   = array.new<line>()
+var line[]  sLongTpLn   = array.new<line>()
+var line[]  sLongSlLn   = array.new<line>()
+
+var float[] sShortEntry = array.new<float>()
+var int[]   sShortBar   = array.new<int>()
+var float[] sShortTPv   = array.new<float>()
+var float[] sShortSLv   = array.new<float>()
+var line[]  sShortEnLn  = array.new<line>()
+var line[]  sShortTpLn  = array.new<line>()
+var line[]  sShortSlLn  = array.new<line>()
+
+var int scalpWins   = 0
+var int scalpLosses = 0
+var int scalpBEs    = 0
+var int lastLongBar  = na
+var int lastShortBar = na
+
+cTP = color.new(#00e676, 0)
+cSL = color.new(#ff5252, 0)
+cEN = color.new(#b2b5be, 30)
+
+// --- Manage open long scalps (SL checked first = conservative) ---
+longTPhit = false
+longSLhit = false
+if array.size(sLongEntry) > 0
+    for i = array.size(sLongEntry) - 1 to 0
+        e   = array.get(sLongEntry, i)
+        eb  = array.get(sLongBar  , i)
+        tpP = array.get(sLongTPv  , i)
+        slP = array.get(sLongSLv  , i)
+        hitSL = bar_index > eb and low  <= slP
+        hitTP = bar_index > eb and not hitSL and high >= tpP
+        if hitSL or hitTP
+            if hitTP
+                scalpWins += 1
+                longTPhit := true
+                if showScalpLines
+                    label.new(bar_index, tpP, "✓ +" + str.tostring((tpP / e - 1) * 100, "#.##") + "%",
+                         style = label.style_label_down, color = color.new(#00e676, 20),
+                         textcolor = color.black, size = size.tiny)
+            else if slP >= e
+                scalpBEs += 1
+                if showScalpLines
+                    label.new(bar_index, slP, "BE",
+                         style = label.style_label_up, color = color.new(#b2b5be, 20),
+                         textcolor = color.black, size = size.tiny)
+            else
+                scalpLosses += 1
+                longSLhit := true
+                if showScalpLines
+                    label.new(bar_index, slP, "✕ stop",
+                         style = label.style_label_up, color = color.new(#ff5252, 20),
+                         textcolor = color.white, size = size.tiny)
+            line.set_x2(array.get(sLongEnLn, i), bar_index)
+            line.set_x2(array.get(sLongTpLn, i), bar_index)
+            line.set_x2(array.get(sLongSlLn, i), bar_index)
+            array.remove(sLongEntry, i), array.remove(sLongBar , i)
+            array.remove(sLongTPv  , i), array.remove(sLongSLv , i)
+            array.remove(sLongEnLn , i), array.remove(sLongTpLn, i), array.remove(sLongSlLn, i)
+        else
+            line.set_x2(array.get(sLongEnLn, i), bar_index + 1)
+            line.set_x2(array.get(sLongTpLn, i), bar_index + 1)
+            line.set_x2(array.get(sLongSlLn, i), bar_index + 1)
+            // Breakeven: once 50% of the target is covered, stop moves to entry
+            if useBreakeven and slP < e and high >= e + (tpP - e) * 0.5
+                array.set(sLongSLv, i, e)
+                line.set_y1(array.get(sLongSlLn, i), e)
+                line.set_y2(array.get(sLongSlLn, i), e)
+
+// --- Manage open short scalps ---
+shortTPhit = false
+shortSLhit = false
+if array.size(sShortEntry) > 0
+    for i = array.size(sShortEntry) - 1 to 0
+        e   = array.get(sShortEntry, i)
+        eb  = array.get(sShortBar  , i)
+        tpP = array.get(sShortTPv  , i)
+        slP = array.get(sShortSLv  , i)
+        hitSL = bar_index > eb and high >= slP
+        hitTP = bar_index > eb and not hitSL and low <= tpP
+        if hitSL or hitTP
+            if hitTP
+                scalpWins += 1
+                shortTPhit := true
+                if showScalpLines
+                    label.new(bar_index, tpP, "✓ +" + str.tostring((e / tpP - 1) * 100, "#.##") + "%",
+                         style = label.style_label_up, color = color.new(#00e676, 20),
+                         textcolor = color.black, size = size.tiny)
+            else if slP <= e
+                scalpBEs += 1
+                if showScalpLines
+                    label.new(bar_index, slP, "BE",
+                         style = label.style_label_down, color = color.new(#b2b5be, 20),
+                         textcolor = color.black, size = size.tiny)
+            else
+                scalpLosses += 1
+                shortSLhit := true
+                if showScalpLines
+                    label.new(bar_index, slP, "✕ stop",
+                         style = label.style_label_down, color = color.new(#ff5252, 20),
+                         textcolor = color.white, size = size.tiny)
+            line.set_x2(array.get(sShortEnLn, i), bar_index)
+            line.set_x2(array.get(sShortTpLn, i), bar_index)
+            line.set_x2(array.get(sShortSlLn, i), bar_index)
+            array.remove(sShortEntry, i), array.remove(sShortBar , i)
+            array.remove(sShortTPv  , i), array.remove(sShortSLv , i)
+            array.remove(sShortEnLn , i), array.remove(sShortTpLn, i), array.remove(sShortSlLn, i)
+        else
+            line.set_x2(array.get(sShortEnLn, i), bar_index + 1)
+            line.set_x2(array.get(sShortTpLn, i), bar_index + 1)
+            line.set_x2(array.get(sShortSlLn, i), bar_index + 1)
+            // Breakeven: once 50% of the target is covered, stop moves to entry
+            if useBreakeven and slP > e and low <= e - (e - tpP) * 0.5
+                array.set(sShortSLv, i, e)
+                line.set_y1(array.get(sShortSlLn, i), e)
+                line.set_y2(array.get(sShortSlLn, i), e)
+
+// --- Loss-streak pause: stand aside after consecutive stop-outs ---
+var int lossStreak    = 0
+var int pauseUntilBar = na
+if longTPhit or shortTPhit
+    lossStreak := 0
+if longSLhit or shortSLhit
+    lossStreak += 1
+    if usePause and lossStreak >= maxLossStreak
+        pauseUntilBar := bar_index + pauseBars
+        lossStreak    := 0
+scalpPaused = usePause and not na(pauseUntilBar) and bar_index <= pauseUntilBar
+
+// --- New scalp entries ---
+scalpLong = enableScalp and wtCrossUp and wt2 < scalpWTLevel
+     and (not useStructFilter or structBull)
+     and (not useZoneFilter   or bullZoneRecent)
+     and (not useMFFilter     or rsiMFI > 0)
+     and (not useKZFilter     or inKillzone)
+     and oscLongOK
+     and boostLongOK
+     and not scalpPaused
+     and array.size(sLongEntry) < scalpMaxOpen
+     and (na(lastLongBar) or bar_index - lastLongBar >= scalpSpacing)
+     and barstate.isconfirmed
+
+scalpShort = enableScalp and wtCrossDown and wt2 > scalpWTLevel
+     and (not useStructFilter or structBear)
+     and (not useZoneFilter   or bearZoneRecent)
+     and (not useMFFilter     or rsiMFI < 0)
+     and (not useKZFilter     or inKillzone)
+     and oscShortOK
+     and boostShortOK
+     and not scalpPaused
+     and array.size(sShortEntry) < scalpMaxOpen
+     and (na(lastShortBar) or bar_index - lastShortBar >= scalpSpacing)
+     and barstate.isconfirmed
+
+if scalpLong
+    e   = close
+    tpP = e * (1 + tpPctEff / 100)
+    slP = e * (1 - slPctEff / 100)
+    lnCol   = showScalpLines ? cEN : color(na)
+    tpCol   = showScalpLines ? cTP : color(na)
+    slCol   = showScalpLines ? cSL : color(na)
+    array.push(sLongEntry, e)
+    array.push(sLongBar  , bar_index)
+    array.push(sLongTPv  , tpP)
+    array.push(sLongSLv  , slP)
+    array.push(sLongEnLn , line.new(bar_index, e  , bar_index + 1, e  , color = lnCol, style = line.style_solid))
+    array.push(sLongTpLn , line.new(bar_index, tpP, bar_index + 1, tpP, color = tpCol, style = line.style_dotted))
+    array.push(sLongSlLn , line.new(bar_index, slP, bar_index + 1, slP, color = slCol, style = line.style_dotted))
+    lastLongBar := bar_index
+
+if scalpShort
+    e   = close
+    tpP = e * (1 - tpPctEff / 100)
+    slP = e * (1 + slPctEff / 100)
+    lnCol   = showScalpLines ? cEN : color(na)
+    tpCol   = showScalpLines ? cTP : color(na)
+    slCol   = showScalpLines ? cSL : color(na)
+    array.push(sShortEntry, e)
+    array.push(sShortBar  , bar_index)
+    array.push(sShortTPv  , tpP)
+    array.push(sShortSLv  , slP)
+    array.push(sShortEnLn , line.new(bar_index, e  , bar_index + 1, e  , color = lnCol, style = line.style_solid))
+    array.push(sShortTpLn , line.new(bar_index, tpP, bar_index + 1, tpP, color = tpCol, style = line.style_dotted))
+    array.push(sShortSlLn , line.new(bar_index, slP, bar_index + 1, slP, color = slCol, style = line.style_dotted))
+    lastShortBar := bar_index
+
+scalpTotal   = scalpWins + scalpLosses
+scalpWinrate = scalpTotal > 0 ? 100.0 * scalpWins / scalpTotal : na
+
+//-----------------------------------------------------------------------------
+// Plots
+//-----------------------------------------------------------------------------
+plotshape(showWTdots and wtCrossUp   and wtOversold   , title = "WT cross up (raw)"  ,
+     style = shape.circle, location = location.belowbar, color = color.new(#00e676, 60), size = size.tiny)
+plotshape(showWTdots and wtCrossDown and wtOverbought , title = "WT cross down (raw)",
+     style = shape.circle, location = location.abovebar, color = color.new(#ff5252, 60), size = size.tiny)
+
+plotshape(buySignal and not strongBuy  , title = "Buy"        , text = "BUY" ,
+     style = shape.labelup  , location = location.belowbar,
+     color = color.new(#00e676, 0), textcolor = color.white, size = size.small)
+plotshape(strongBuy                    , title = "Strong Buy" , text = "BUY+",
+     style = shape.labelup  , location = location.belowbar,
+     color = color.new(#e2a400, 0), textcolor = color.black, size = size.small)
+
+plotshape(sellSignal and not strongSell, title = "Sell"       , text = "SELL",
+     style = shape.labeldown, location = location.abovebar,
+     color = color.new(#ff5252, 0), textcolor = color.white, size = size.small)
+plotshape(strongSell                   , title = "Strong Sell", text = "SELL+",
+     style = shape.labeldown, location = location.abovebar,
+     color = color.new(#e600e6, 0), textcolor = color.white, size = size.small)
+
+plotshape(wtBullDiv, title = "WT Bullish Divergence", style = shape.diamond,
+     location = location.belowbar, color = color.new(#00e676, 40), size = size.tiny, offset = -2)
+plotshape(wtBearDiv, title = "WT Bearish Divergence", style = shape.diamond,
+     location = location.abovebar, color = color.new(#ff5252, 40), size = size.tiny, offset = -2)
+
+plotshape(scalpLong , title = "Scalp Long" , text = "S", style = shape.triangleup  ,
+     location = location.belowbar, color = color.new(#00bcd4, 0),
+     textcolor = color.new(#00bcd4, 0), size = size.tiny)
+plotshape(scalpShort, title = "Scalp Short", text = "S", style = shape.triangledown,
+     location = location.abovebar, color = color.new(#ff9800, 0),
+     textcolor = color.new(#ff9800, 0), size = size.tiny)
+
+plot(useTrendEMA ? emaTrend : na, title = "Trend EMA",
+     color = close > emaTrend ? color.new(#00e676, 60) : color.new(#ff5252, 60), linewidth = 2)
+
+//-----------------------------------------------------------------------------
+// Dashboard
+//-----------------------------------------------------------------------------
+var table dash = table.new(position.top_right, 2, 11, bgcolor = color.new(color.black, 30),
+     border_color = color.new(color.gray, 60), border_width = 1)
+
+if showDash and barstate.islast
+    upCol = color.new(#00e676, 0)
+    dnCol = color.new(#ff5252, 0)
+    nCol  = color.new(#b2b5be, 0)
+    table.cell(dash, 0, 0, "ICT+VMC"      , text_color = color.white, text_size = size.small)
+    table.cell(dash, 1, 0, ""             , text_color = color.white, text_size = size.small)
+    table.cell(dash, 0, 1, "Structure"    , text_color = nCol, text_size = size.tiny)
+    table.cell(dash, 1, 1, structBull ? "Bullish" : structBear ? "Bearish" : "Neutral",
+         text_color = structBull ? upCol : structBear ? dnCol : nCol, text_size = size.tiny)
+    table.cell(dash, 0, 2, "WaveTrend"    , text_color = nCol, text_size = size.tiny)
+    table.cell(dash, 1, 2, str.tostring(wt2, "#.##") + (wtOversold ? " OS" : wtOverbought ? " OB" : ""),
+         text_color = wtOversold ? upCol : wtOverbought ? dnCol : nCol, text_size = size.tiny)
+    table.cell(dash, 0, 3, "HTF WT"       , text_color = nCol, text_size = size.tiny)
+    table.cell(dash, 1, 3, str.tostring(htfWt2, "#.##") + (htfWt2 > htfWt2[2] ? " ▲" : " ▼"),
+         text_color = htfWt2 > htfWt2[2] ? upCol : dnCol, text_size = size.tiny)
+    table.cell(dash, 0, 4, "Money Flow"   , text_color = nCol, text_size = size.tiny)
+    table.cell(dash, 1, 4, rsiMFI > 0 ? "Positive" : "Negative",
+         text_color = rsiMFI > 0 ? upCol : dnCol, text_size = size.tiny)
+    table.cell(dash, 0, 5, "Bull zone"    , text_color = nCol, text_size = size.tiny)
+    table.cell(dash, 1, 5, bullZoneRecent ? "Active" : "-",
+         text_color = bullZoneRecent ? upCol : nCol, text_size = size.tiny)
+    table.cell(dash, 0, 6, "Bear zone"    , text_color = nCol, text_size = size.tiny)
+    table.cell(dash, 1, 6, bearZoneRecent ? "Active" : "-",
+         text_color = bearZoneRecent ? dnCol : nCol, text_size = size.tiny)
+    table.cell(dash, 0, 7, "Open scalps"  , text_color = nCol, text_size = size.tiny)
+    table.cell(dash, 1, 7, str.tostring(array.size(sLongEntry)) + " L / " + str.tostring(array.size(sShortEntry)) + " S",
+         text_color = nCol, text_size = size.tiny)
+    table.cell(dash, 0, 8, "W / L / BE"   , text_color = nCol, text_size = size.tiny)
+    table.cell(dash, 1, 8, str.tostring(scalpWins) + " / " + str.tostring(scalpLosses) + " / " + str.tostring(scalpBEs),
+         text_color = scalpWins >= scalpLosses ? upCol : dnCol, text_size = size.tiny)
+    table.cell(dash, 0, 9, "Scalp winrate", text_color = nCol, text_size = size.tiny)
+    table.cell(dash, 1, 9, na(scalpWinrate) ? "-" : str.tostring(scalpWinrate, "#.#") + "%",
+         text_color = na(scalpWinrate) ? nCol : scalpWinrate >= 50 ? upCol : dnCol, text_size = size.tiny)
+    table.cell(dash, 0, 10, "Regime"      , text_color = nCol, text_size = size.tiny)
+    table.cell(dash, 1, 10, (close > emaTrend ? "Up" : "Down") + " / ADX " + str.tostring(adxVal, "#")
+         + (scalpPaused ? " / PAUSED" : ""),
+         text_color = scalpPaused ? dnCol : adxVal >= adxThresh ? (close > emaTrend ? upCol : dnCol) : nCol,
+         text_size = size.tiny)
+
+//-----------------------------------------------------------------------------
+// Alerts
+//-----------------------------------------------------------------------------
+alertcondition(buySignal , "Buy signal"        , "ICT+VMC: Buy - WT oversold cross up with ICT confluence")
+alertcondition(strongBuy , "Strong Buy signal" , "ICT+VMC: STRONG Buy - confluence + bullish divergence")
+alertcondition(sellSignal, "Sell signal"       , "ICT+VMC: Sell - WT overbought cross down with ICT confluence")
+alertcondition(strongSell, "Strong Sell signal", "ICT+VMC: STRONG Sell - confluence + bearish divergence")
+alertcondition(buySignal or sellSignal, "Any signal", "ICT+VMC: Buy or Sell signal")
+
+alertcondition(scalpLong             , "Scalp Long entry"  , "ICT+VMC Scalp: Long entry - TP at min profit target")
+alertcondition(scalpShort            , "Scalp Short entry" , "ICT+VMC Scalp: Short entry - TP at min profit target")
+alertcondition(scalpLong or scalpShort, "Scalp entry (any)", "ICT+VMC Scalp: new scalp entry")
+alertcondition(longTPhit or shortTPhit, "Scalp TP hit"     , "ICT+VMC Scalp: take profit reached (min profit secured)")
+alertcondition(longSLhit or shortSLhit, "Scalp SL hit"     , "ICT+VMC Scalp: stop loss hit")
