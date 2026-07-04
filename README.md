@@ -42,7 +42,7 @@ A demonstration project for GitHub repository creation workflow
    - `Crowd Extremity Score Threshold` (default 60): higher = fewer, stronger signals.
    - `Require Divergence For Contrarian Signals`: only take fades confirmed by a divergence.
    - `Capitulation / Euphoria Streak`: consecutive candles counted as a crowd extreme.
-4. Set alerts from the indicator's built-in alert conditions if you want notifications.
+4. Set alerts: create ONE alert on the indicator with condition **"Any alert() function call"** — it covers all enabled signal types (toggles in the Alerts input group) with ticker, timeframe, price, and score filled in dynamically. Classic per-signal `alertcondition` hooks are also available. For the strategy, create an alert with **"Order fills"** (or put `{{strategy.order.alert_message}}` in the alert message) to get entry/exit notifications with stop and target prices.
 
 ### Reading the signals
 

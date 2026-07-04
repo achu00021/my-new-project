@@ -125,6 +125,15 @@ grpDsp = 'Display'
 showClassicCircles = input.bool(true, 'Show Classic Cipher B Buy/Sell Circles', group = grpDsp)
 showLabels         = input.bool(true, 'Show Contrarian Signal Labels', group = grpDsp)
 
+// --- Alerts ---
+grpAlr = 'Alerts'
+alertOnBuy    = input.bool(true,  'Alert: Contrarian Buy',  group = grpAlr)
+alertOnSell   = input.bool(true,  'Alert: Contrarian Sell', group = grpAlr)
+alertOnStrong = input.bool(true,  'Alert: Strong Signals',  group = grpAlr)
+alertOnDiv    = input.bool(false, 'Alert: Divergences',     group = grpAlr)
+alertOnFade   = input.bool(false, 'Alert: Fade Warnings',   group = grpAlr,
+     tooltip = 'These toggles control the dynamic alert() messages. Create ONE alert in TradingView with condition "Any alert() function call" and it will cover everything enabled here, with ticker/timeframe/price/score filled in automatically.')
+
 // --- Winrate table ---
 grpTbl = 'Winrate Table'
 showWinTable = input.bool(true, 'Show Signal Winrate Table', group = grpTbl)
@@ -394,6 +403,29 @@ alertcondition(wtBullDiv,      'WT Bullish Divergence',  'Contrarian Cipher B: b
 alertcondition(wtBearDiv,      'WT Bearish Divergence',  'Contrarian Cipher B: bearish divergence on WaveTrend.')
 alertcondition(fadeWarnLong,   'Fade Warning (long)',    'Contrarian Cipher B: late sellers at extreme oversold — contrarian long warning.')
 alertcondition(fadeWarnShort,  'Fade Warning (short)',   'Contrarian Cipher B: late buyers at extreme overbought — contrarian short warning.')
+
+// Dynamic alert() messages: create ONE TradingView alert on this indicator with
+// condition "Any alert() function call" and every enabled event below fires
+// through it with live ticker / timeframe / price / score details.
+alertPrefix = syminfo.ticker + ' ' + timeframe.period + ' | Contrarian Cipher B | '
+
+if barstate.isconfirmed
+    if alertOnStrong and strongBuy
+        alert(alertPrefix + 'STRONG BUY @ ' + str.tostring(close) + ' | score ' + str.tostring(scoreOS, '#') + '/100 | extreme oversold + divergence. Fade the panic.', alert.freq_once_per_bar_close)
+    else if alertOnBuy and contrarianBuy
+        alert(alertPrefix + 'BUY @ ' + str.tostring(close) + ' | score ' + str.tostring(scoreOS, '#') + '/100 | crowd extremely bearish, WT crossed up.', alert.freq_once_per_bar_close)
+    if alertOnStrong and strongSell
+        alert(alertPrefix + 'STRONG SELL @ ' + str.tostring(close) + ' | score ' + str.tostring(scoreOB, '#') + '/100 | extreme overbought + divergence. Fade the euphoria.', alert.freq_once_per_bar_close)
+    else if alertOnSell and contrarianSell
+        alert(alertPrefix + 'SELL @ ' + str.tostring(close) + ' | score ' + str.tostring(scoreOB, '#') + '/100 | crowd extremely bullish, WT crossed down.', alert.freq_once_per_bar_close)
+    if alertOnDiv and wtBullDiv
+        alert(alertPrefix + 'Bullish divergence on WaveTrend @ ' + str.tostring(close), alert.freq_once_per_bar_close)
+    if alertOnDiv and wtBearDiv
+        alert(alertPrefix + 'Bearish divergence on WaveTrend @ ' + str.tostring(close), alert.freq_once_per_bar_close)
+    if alertOnFade and fadeWarnLong
+        alert(alertPrefix + 'Fade warning: late sellers at extreme oversold — lean long.', alert.freq_once_per_bar_close)
+    if alertOnFade and fadeWarnShort
+        alert(alertPrefix + 'Fade warning: late buyers at extreme overbought — lean short.', alert.freq_once_per_bar_close)
 
 // ============================================================================
 // SIGNAL WINRATE TABLE

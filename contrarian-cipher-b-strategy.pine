@@ -254,32 +254,38 @@ allowShort = tradeDirection != 'Long Only'
 
 var float entryAtr = na
 
+alertTicker = syminfo.ticker + ' ' + timeframe.period + ' | CCB v2 | '
+
 if contrarianBuy and allowLong and strategy.position_size <= 0
     entryAtr := atrVal
-    strategy.entry('Long', strategy.long)
+    strategy.entry('Long', strategy.long,
+         alert_message = alertTicker + 'ENTER LONG @ ' + str.tostring(close) + ' | SL ' + str.tostring(close - atrStopMult * atrVal, format.mintick) + ' | TP ' + str.tostring(close + atrTargetMult * atrVal, format.mintick))
 
 if contrarianSell and allowShort and strategy.position_size >= 0
     entryAtr := atrVal
-    strategy.entry('Short', strategy.short)
+    strategy.entry('Short', strategy.short,
+         alert_message = alertTicker + 'ENTER SHORT @ ' + str.tostring(close) + ' | SL ' + str.tostring(close + atrStopMult * atrVal, format.mintick) + ' | TP ' + str.tostring(close - atrTargetMult * atrVal, format.mintick))
 
 if strategy.position_size > 0
     strategy.exit('Long SL/TP', 'Long',
          stop  = strategy.position_avg_price - atrStopMult   * entryAtr,
-         limit = strategy.position_avg_price + atrTargetMult * entryAtr)
+         limit = strategy.position_avg_price + atrTargetMult * entryAtr,
+         alert_message = alertTicker + 'EXIT LONG (stop or target hit)')
     // Mean-reversion target reached: oscillator back at/above the mean
     if useMeanRevExit and ta.crossover(wt2, 0)
-        strategy.close('Long', comment = 'WT mean revert')
+        strategy.close('Long', comment = 'WT mean revert', alert_message = alertTicker + 'EXIT LONG @ ' + str.tostring(close) + ' | WaveTrend reverted to zero')
     if maxBarsInTrade > 0 and bar_index - strategy.opentrades.entry_bar_index(strategy.opentrades - 1) >= maxBarsInTrade
-        strategy.close('Long', comment = 'Time stop')
+        strategy.close('Long', comment = 'Time stop', alert_message = alertTicker + 'EXIT LONG @ ' + str.tostring(close) + ' | time stop')
 
 if strategy.position_size < 0
     strategy.exit('Short SL/TP', 'Short',
          stop  = strategy.position_avg_price + atrStopMult   * entryAtr,
-         limit = strategy.position_avg_price - atrTargetMult * entryAtr)
+         limit = strategy.position_avg_price - atrTargetMult * entryAtr,
+         alert_message = alertTicker + 'EXIT SHORT (stop or target hit)')
     if useMeanRevExit and ta.crossunder(wt2, 0)
-        strategy.close('Short', comment = 'WT mean revert')
+        strategy.close('Short', comment = 'WT mean revert', alert_message = alertTicker + 'EXIT SHORT @ ' + str.tostring(close) + ' | WaveTrend reverted to zero')
     if maxBarsInTrade > 0 and bar_index - strategy.opentrades.entry_bar_index(strategy.opentrades - 1) >= maxBarsInTrade
-        strategy.close('Short', comment = 'Time stop')
+        strategy.close('Short', comment = 'Time stop', alert_message = alertTicker + 'EXIT SHORT @ ' + str.tostring(close) + ' | time stop')
 
 // ============================================================================
 // CHART VISUALS
