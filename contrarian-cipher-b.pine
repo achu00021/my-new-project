@@ -1,0 +1,301 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0
+// https://mozilla.org/MPL/2.0/
+//
+// Contrarian Cipher B
+// -------------------
+// A contrarian trading indicator built on top of the latest public VuManChu
+// Cipher B (v2, "Cipher B Divergences") core components:
+//   - WaveTrend oscillator (WT1 / WT2 + VWAP area)
+//   - Money Flow area (RSI-MFI hybrid)
+//   - RSI and Stochastic RSI
+//   - Fractal-based divergence detection (regular divergences)
+//
+// On top of the classic Cipher B engine, this script adds a CONTRARIAN layer:
+//   - A "Crowd Extremity Score" (0-100) that measures how stretched the
+//     current move is (WaveTrend, RSI, Stoch RSI, Money Flow and consecutive
+//     candle streaks all contribute).
+//   - Contrarian BUY: fires when the crowd is extremely bearish (deep
+//     oversold + optional bullish divergence) and WaveTrend crosses up,
+//     i.e. you fade the panic.
+//   - Contrarian SELL: fires when the crowd is extremely bullish (deep
+//     overbought + optional bearish divergence) and WaveTrend crosses down,
+//     i.e. you fade the euphoria.
+//   - Optional "Fade Mode" that flags classic Cipher B momentum signals
+//     appearing at extreme levels as late-crowd contrarian warnings.
+//
+// Credits: WaveTrend / Cipher B concepts by VuManChu (Cipher B Divergences),
+// which itself builds on LazyBear's WaveTrend oscillator. This is an
+// independent re-implementation with a contrarian signal engine added.
+
+//@version=6
+indicator('Contrarian Cipher B [VuManChu based]', shorttitle = 'Contrarian Cipher B', overlay = false, max_labels_count = 500)
+
+// ============================================================================
+// INPUTS
+// ============================================================================
+
+// --- WaveTrend (Cipher B core) ---
+grpWT = 'WaveTrend (Cipher B core)'
+wtChannelLen  = input.int(9,  'WT Channel Length', minval = 1, group = grpWT)
+wtAverageLen  = input.int(12, 'WT Average Length', minval = 1, group = grpWT)
+wtMALen       = input.int(3,  'WT MA Length',      minval = 1, group = grpWT)
+wtMASource    = input.source(hlc3, 'WT Source', group = grpWT)
+obLevel1      = input.int(53,  'WT Overbought Level 1', group = grpWT)
+obLevel2      = input.int(60,  'WT Overbought Level 2 (extreme)', group = grpWT)
+osLevel1      = input.int(-53, 'WT Oversold Level 1', group = grpWT)
+osLevel2      = input.int(-60, 'WT Oversold Level 2 (extreme)', group = grpWT)
+
+// --- Money Flow ---
+grpMF = 'Money Flow (RSI-MFI)'
+mfiPeriod     = input.int(60,      'MFI Period', minval = 1, group = grpMF)
+mfiMultiplier = input.float(150.0, 'MFI Area Multiplier', step = 10, group = grpMF)
+mfiExtreme    = input.float(15.0,  'MFI Extreme Threshold (contrarian)', minval = 0, group = grpMF)
+
+// --- RSI / Stoch RSI ---
+grpRSI = 'RSI & Stochastic RSI'
+rsiLen        = input.int(14, 'RSI Length',    minval = 1, group = grpRSI)
+rsiOversold   = input.int(30, 'RSI Oversold',   maxval = 50, group = grpRSI)
+rsiOverbought = input.int(60, 'RSI Overbought', minval = 50, group = grpRSI)
+stochUseLog   = input.bool(true, 'Stoch RSI: Use Log Scale', group = grpRSI)
+stochLen      = input.int(14, 'Stoch Length',     minval = 1, group = grpRSI)
+stochRsiLen   = input.int(14, 'Stoch RSI Length', minval = 1, group = grpRSI)
+stochKSmooth  = input.int(3,  'Stoch K Smooth',   minval = 1, group = grpRSI)
+stochDSmooth  = input.int(3,  'Stoch D Smooth',   minval = 1, group = grpRSI)
+
+// --- Divergences ---
+grpDiv = 'Divergences'
+showWTDiv     = input.bool(true,  'Show WaveTrend Divergences', group = grpDiv)
+showRSIDiv    = input.bool(false, 'Show RSI Divergences',       group = grpDiv)
+wtDivOBLevel  = input.int(45,  'WT Bearish Div Min Level', group = grpDiv)
+wtDivOSLevel  = input.int(-65, 'WT Bullish Div Max Level', group = grpDiv)
+divUseLimits  = input.bool(true, 'Only Detect Divergences At Extremes', group = grpDiv)
+
+// --- Contrarian engine ---
+grpCon = 'Contrarian Engine'
+conThreshold   = input.int(60, 'Crowd Extremity Score Threshold', minval = 0, maxval = 100, group = grpCon,
+     tooltip = 'Minimum extremity score (0-100) required before a contrarian signal can fire. Higher = fewer, stronger signals.')
+conNeedDiv     = input.bool(false, 'Require Divergence For Contrarian Signals', group = grpCon,
+     tooltip = 'If enabled, a contrarian buy needs a recent bullish divergence and a contrarian sell needs a recent bearish divergence.')
+conDivLookback = input.int(10, 'Divergence Lookback (bars)', minval = 1, group = grpCon,
+     tooltip = 'How many bars back a divergence still counts as "recent" for signal confirmation.')
+conStreakLen   = input.int(5, 'Capitulation / Euphoria Streak (bars)', minval = 2, group = grpCon,
+     tooltip = 'Number of consecutive down (up) candles that counts as capitulation (euphoria) for the extremity score.')
+showFadeMode   = input.bool(true, 'Fade Mode: Flag Classic Signals At Extremes', group = grpCon,
+     tooltip = 'Marks classic Cipher B momentum crosses that appear at extreme levels as contrarian warnings (crowd likely late).')
+showScore      = input.bool(true, 'Show Crowd Extremity Score Line', group = grpCon)
+
+// --- Display ---
+grpDsp = 'Display'
+showClassicCircles = input.bool(true, 'Show Classic Cipher B Buy/Sell Circles', group = grpDsp)
+showLabels         = input.bool(true, 'Show Contrarian Signal Labels', group = grpDsp)
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+// Fractal detection (same 5-bar fractal logic used by Cipher B divergences)
+f_topFractal(series float src) =>
+    src[4] < src[2] and src[3] < src[2] and src[2] > src[1] and src[2] > src[0]
+
+f_botFractal(series float src) =>
+    src[4] > src[2] and src[3] > src[2] and src[2] < src[1] and src[2] < src[0]
+
+// Regular divergence detection on any oscillator source
+f_findDivs(series float src, float topLimit, float botLimit, bool useLimits) =>
+    isTop = f_topFractal(src) and (useLimits ? src[2] >= topLimit : true)
+    isBot = f_botFractal(src) and (useLimits ? src[2] <= botLimit : true)
+    prevTopVal   = ta.valuewhen(isTop, src[2],  0)[2]
+    prevTopPrice = ta.valuewhen(isTop, high[2], 0)[2]
+    prevBotVal   = ta.valuewhen(isBot, src[2],  0)[2]
+    prevBotPrice = ta.valuewhen(isBot, low[2],  0)[2]
+    bearDiv = isTop and high[2] > prevTopPrice and src[2] < prevTopVal
+    bullDiv = isBot and low[2]  < prevBotPrice and src[2] > prevBotVal
+    [bearDiv, bullDiv]
+
+// WaveTrend oscillator (Cipher B core)
+f_wavetrend(series float src, int chLen, int avgLen, int maLen) =>
+    esa = ta.ema(src, chLen)
+    de  = ta.ema(math.abs(src - esa), chLen)
+    ci  = (src - esa) / (0.015 * de)
+    wt1 = ta.ema(ci, avgLen)
+    wt2 = ta.sma(wt1, maLen)
+    [wt1, wt2]
+
+// RSI-MFI hybrid money flow area (Cipher B style)
+f_rsimfi(int period, float multiplier) =>
+    candleRange = math.max(high - low, syminfo.mintick)
+    ta.sma(((close - open) / candleRange) * multiplier, period)
+
+// ============================================================================
+// CALCULATIONS
+// ============================================================================
+
+// WaveTrend
+[wt1, wt2] = f_wavetrend(wtMASource, wtChannelLen, wtAverageLen, wtMALen)
+wtVwap       = wt1 - wt2
+wtCrossUp    = ta.crossover(wt1, wt2)
+wtCrossDown  = ta.crossunder(wt1, wt2)
+wtOversold   = wt2 <= osLevel1
+wtOverbought = wt2 >= obLevel1
+wtExtremeOS  = wt2 <= osLevel2
+wtExtremeOB  = wt2 >= obLevel2
+
+// Money Flow
+moneyFlow    = f_rsimfi(mfiPeriod, mfiMultiplier)
+mfExtremeNeg = moneyFlow <= -mfiExtreme
+mfExtremePos = moneyFlow >=  mfiExtreme
+
+// RSI
+rsi = ta.rsi(close, rsiLen)
+
+// Stoch RSI
+stochSrc = stochUseLog ? math.log(close) : close
+stochRsi = ta.rsi(stochSrc, stochRsiLen)
+stochK   = ta.sma(ta.stoch(stochRsi, stochRsi, stochRsi, stochLen), stochKSmooth)
+stochD   = ta.sma(stochK, stochDSmooth)
+plot(stochK, 'Stoch RSI K (hidden by default)', color = color.new(#2196f3, 100), display = display.none)
+plot(stochD, 'Stoch RSI D (hidden by default)', color = color.new(#ff9800, 100), display = display.none)
+
+// Divergences
+[wtBearDiv,  wtBullDiv]  = f_findDivs(wt2, wtDivOBLevel, wtDivOSLevel, divUseLimits)
+[rsiBearDiv, rsiBullDiv] = f_findDivs(rsi, 60, 30, divUseLimits)
+
+anyBullDiv = (showWTDiv and wtBullDiv) or (showRSIDiv and rsiBullDiv)
+anyBearDiv = (showWTDiv and wtBearDiv) or (showRSIDiv and rsiBearDiv)
+
+// Candle streaks (capitulation / euphoria)
+var int downStreak = 0
+var int upStreak   = 0
+downStreak := close < open ? downStreak + 1 : 0
+upStreak   := close > open ? upStreak + 1   : 0
+capitulation = downStreak >= conStreakLen
+euphoria     = upStreak   >= conStreakLen
+
+// ============================================================================
+// CROWD EXTREMITY SCORE (0-100)
+// scoreOS: how extremely BEARISH the crowd is -> contrarian LONG side.
+// scoreOB: how extremely BULLISH the crowd is -> contrarian SHORT side.
+// ============================================================================
+
+scoreOS = 0.0
+scoreOS := scoreOS + (wtOversold  ? 20 : 0)
+scoreOS := scoreOS + (wtExtremeOS ? 15 : 0)
+scoreOS := scoreOS + (rsi <= rsiOversold ? 20 : 0)
+scoreOS := scoreOS + (stochK <= 20 ? 15 : 0)
+scoreOS := scoreOS + (mfExtremeNeg ? 15 : 0)
+scoreOS := scoreOS + (capitulation ? 15 : 0)
+
+scoreOB = 0.0
+scoreOB := scoreOB + (wtOverbought ? 20 : 0)
+scoreOB := scoreOB + (wtExtremeOB  ? 15 : 0)
+scoreOB := scoreOB + (rsi >= rsiOverbought ? 20 : 0)
+scoreOB := scoreOB + (stochK >= 80 ? 15 : 0)
+scoreOB := scoreOB + (mfExtremePos ? 15 : 0)
+scoreOB := scoreOB + (euphoria     ? 15 : 0)
+
+// Signed score for plotting: +ve = fade the bears (long), -ve = fade the bulls (short)
+crowdScore = scoreOS - scoreOB
+
+// ============================================================================
+// SIGNALS
+// ============================================================================
+
+// Classic Cipher B momentum circles (WT cross while at OS/OB)
+classicBuy  = wtCrossUp and wtOversold
+classicSell = wtCrossDown and wtOverbought
+
+// Track recent divergences so a signal a few bars after the divergence still counts
+var int barsSinceBullDiv = 100000
+var int barsSinceBearDiv = 100000
+barsSinceBullDiv := anyBullDiv ? 0 : barsSinceBullDiv + 1
+barsSinceBearDiv := anyBearDiv ? 0 : barsSinceBearDiv + 1
+recentBullDiv = barsSinceBullDiv <= conDivLookback
+recentBearDiv = barsSinceBearDiv <= conDivLookback
+
+// Contrarian signals: fade the crowd at extremes, triggered by a WT cross back
+contrarianBuy  = wtCrossUp   and scoreOS >= conThreshold and (not conNeedDiv or recentBullDiv)
+contrarianSell = wtCrossDown and scoreOB >= conThreshold and (not conNeedDiv or recentBearDiv)
+
+// Strong variants: extremity + divergence + extreme WT level all align
+strongBuy  = contrarianBuy  and recentBullDiv and wtExtremeOS
+strongSell = contrarianSell and recentBearDiv and wtExtremeOB
+
+// Fade Mode: a classic momentum cross firing AT an extreme is a late-crowd warning.
+// A WT cross down at extreme oversold = late shorts (fade them, lean long).
+// A WT cross up at extreme overbought = late longs (fade them, lean short).
+fadeWarnLong  = showFadeMode and wtCrossDown and wtExtremeOS
+fadeWarnShort = showFadeMode and wtCrossUp   and wtExtremeOB
+
+// ============================================================================
+// PLOTS
+// ============================================================================
+
+colWT1     = color.new(#90caf9, 0)
+colWT2     = color.new(#0d47a1, 20)
+colVwap    = color.new(#ffe500, 45)
+colBuy     = color.new(#00e676, 0)
+colSell    = color.new(#ff5252, 0)
+colStrongB = color.new(#00ffaa, 0)
+colStrongS = color.new(#ff00aa, 0)
+colScore   = color.new(#b388ff, 0)
+
+// Zero line & OB/OS guides
+hline(0, 'Zero', color = color.new(color.gray, 60))
+hline(obLevel1, 'Overbought 1', color = color.new(#ff5252, 75))
+hline(obLevel2, 'Overbought 2', color = color.new(#ff5252, 60), linestyle = hline.style_dotted)
+hline(osLevel1, 'Oversold 1',   color = color.new(#00e676, 75))
+hline(osLevel2, 'Oversold 2',   color = color.new(#00e676, 60), linestyle = hline.style_dotted)
+
+// WaveTrend waves
+plot(wt1, 'WT Wave 1', color = colWT1, style = plot.style_area)
+plot(wt2, 'WT Wave 2', color = colWT2, style = plot.style_area)
+plot(wtVwap, 'WT VWAP', color = colVwap, style = plot.style_area)
+
+// Money flow area (green above zero, red below — Cipher B style)
+plot(moneyFlow, 'Money Flow', color = moneyFlow > 0 ? color.new(#3fff00, 55) : color.new(#ff1100, 55), style = plot.style_area)
+
+// RSI (scaled from 0..100 to -100..100 so it shares the WT pane)
+plot((rsi - 50) * 2, 'RSI (scaled)', color = color.new(#ce93d8, 60))
+
+// Crowd extremity score (signed)
+plot(showScore ? crowdScore : na, 'Crowd Extremity Score', color = colScore, style = plot.style_stepline, linewidth = 1)
+
+// Classic Cipher B circles
+plotshape(showClassicCircles and classicBuy  ? wt2 : na, 'Classic Buy Circle',  style = shape.circle, location = location.absolute, color = color.new(#00e676, 25), size = size.tiny)
+plotshape(showClassicCircles and classicSell ? wt2 : na, 'Classic Sell Circle', style = shape.circle, location = location.absolute, color = color.new(#ff5252, 25), size = size.tiny)
+
+// Divergence markers (plotted on the fractal pivot, 2 bars back)
+plotshape(showWTDiv and wtBullDiv ? wt2[2] : na, 'WT Bullish Div', style = shape.labelup,   location = location.absolute, color = color.new(#00e676, 40), text = 'Bull\nDiv', textcolor = color.white, size = size.tiny, offset = -2)
+plotshape(showWTDiv and wtBearDiv ? wt2[2] : na, 'WT Bearish Div', style = shape.labeldown, location = location.absolute, color = color.new(#ff5252, 40), text = 'Bear\nDiv', textcolor = color.white, size = size.tiny, offset = -2)
+
+// Contrarian signals
+plotshape(contrarianBuy and not strongBuy,   'Contrarian Buy',  style = shape.triangleup,   location = location.bottom, color = colBuy,  size = size.small)
+plotshape(contrarianSell and not strongSell, 'Contrarian Sell', style = shape.triangledown, location = location.top,    color = colSell, size = size.small)
+plotshape(strongBuy,  'Strong Contrarian Buy',  style = shape.triangleup,   location = location.bottom, color = colStrongB, size = size.normal)
+plotshape(strongSell, 'Strong Contrarian Sell', style = shape.triangledown, location = location.top,    color = colStrongS, size = size.normal)
+
+// Fade-mode warnings
+plotshape(fadeWarnLong,  'Fade Warning (lean long)',  style = shape.diamond, location = location.bottom, color = color.new(#ffd54f, 0), size = size.tiny)
+plotshape(fadeWarnShort, 'Fade Warning (lean short)', style = shape.diamond, location = location.top,    color = color.new(#ffd54f, 0), size = size.tiny)
+
+// Labels for strong signals
+if showLabels and strongBuy
+    label.new(bar_index, osLevel2 - 15, 'FADE THE PANIC\nStrong Buy', style = label.style_label_up, color = color.new(#00e676, 20), textcolor = color.white, size = size.small)
+if showLabels and strongSell
+    label.new(bar_index, obLevel2 + 15, 'FADE THE EUPHORIA\nStrong Sell', style = label.style_label_down, color = color.new(#ff5252, 20), textcolor = color.white, size = size.small)
+
+// Background tint at extreme crowd readings
+bgcolor(scoreOS >= conThreshold ? color.new(#00e676, 92) : scoreOB >= conThreshold ? color.new(#ff5252, 92) : na)
+
+// ============================================================================
+// ALERTS
+// ============================================================================
+
+alertcondition(contrarianBuy,  'Contrarian Buy',         'Contrarian Cipher B: BUY — crowd extremely bearish, WaveTrend crossed up. Fade the panic.')
+alertcondition(contrarianSell, 'Contrarian Sell',        'Contrarian Cipher B: SELL — crowd extremely bullish, WaveTrend crossed down. Fade the euphoria.')
+alertcondition(strongBuy,      'Strong Contrarian Buy',  'Contrarian Cipher B: STRONG BUY — extreme oversold + bullish divergence + WT cross up.')
+alertcondition(strongSell,     'Strong Contrarian Sell', 'Contrarian Cipher B: STRONG SELL — extreme overbought + bearish divergence + WT cross down.')
+alertcondition(wtBullDiv,      'WT Bullish Divergence',  'Contrarian Cipher B: bullish divergence on WaveTrend.')
+alertcondition(wtBearDiv,      'WT Bearish Divergence',  'Contrarian Cipher B: bearish divergence on WaveTrend.')
+alertcondition(fadeWarnLong,   'Fade Warning (long)',    'Contrarian Cipher B: late sellers at extreme oversold — contrarian long warning.')
+alertcondition(fadeWarnShort,  'Fade Warning (short)',   'Contrarian Cipher B: late buyers at extreme overbought — contrarian short warning.')
