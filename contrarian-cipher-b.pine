@@ -1,8 +1,8 @@
 // This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0
 // https://mozilla.org/MPL/2.0/
 //
-// Contrarian Cipher B
-// -------------------
+// Contrarian Cipher B v2
+// ----------------------
 // A contrarian trading indicator built on top of the latest public VuManChu
 // Cipher B (v2, "Cipher B Divergences") core components:
 //   - WaveTrend oscillator (WT1 / WT2 + VWAP area)
@@ -10,25 +10,32 @@
 //   - RSI and Stochastic RSI
 //   - Fractal-based divergence detection (regular divergences)
 //
-// On top of the classic Cipher B engine, this script adds a CONTRARIAN layer:
-//   - A "Crowd Extremity Score" (0-100) that measures how stretched the
-//     current move is (WaveTrend, RSI, Stoch RSI, Money Flow and consecutive
-//     candle streaks all contribute).
-//   - Contrarian BUY: fires when the crowd is extremely bearish (deep
-//     oversold + optional bullish divergence) and WaveTrend crosses up,
-//     i.e. you fade the panic.
-//   - Contrarian SELL: fires when the crowd is extremely bullish (deep
-//     overbought + optional bearish divergence) and WaveTrend crosses down,
-//     i.e. you fade the euphoria.
-//   - Optional "Fade Mode" that flags classic Cipher B momentum signals
-//     appearing at extreme levels as late-crowd contrarian warnings.
+// v2 quality upgrades (designed to raise signal quality on ALL timeframes):
+//   - ADAPTIVE OB/OS LEVELS: WaveTrend thresholds are computed from the
+//     recent distribution (percentile rank) instead of fixed +-53/+-60, so
+//     the indicator self-calibrates to any timeframe and any asset.
+//   - HTF CONFIRMATION: contrarian longs are blocked when the higher
+//     timeframe WaveTrend is still overbought (and vice versa), so you only
+//     fade extremes that are aligned with the bigger picture.
+//   - ADX TREND FILTER: contrarian signals are suppressed when a strong
+//     trend (high ADX + DI direction against the trade) is running them
+//     over. Fading a freight train is the #1 mean-reversion account killer.
+//   - PRICE STRETCH: distance from a long EMA measured in ATRs feeds the
+//     extremity score, so signals need genuine overextension, not just an
+//     oscillator wiggle.
+//   - CONFIRMATION CANDLE + COOLDOWN: optional candle-close confirmation
+//     and a minimum spacing between signals to avoid clustered losses.
+//
+// A companion strategy script (contrarian-cipher-b-strategy.pine) implements
+// the same engine with ATR stops/targets so the winrate can be MEASURED in
+// TradingView's Strategy Tester on any symbol and timeframe.
 //
 // Credits: WaveTrend / Cipher B concepts by VuManChu (Cipher B Divergences),
 // which itself builds on LazyBear's WaveTrend oscillator. This is an
 // independent re-implementation with a contrarian signal engine added.
 
 //@version=6
-indicator('Contrarian Cipher B [VuManChu based]', shorttitle = 'Contrarian Cipher B', overlay = false, max_labels_count = 500)
+indicator('Contrarian Cipher B v2 [VuManChu based]', shorttitle = 'Contrarian Cipher B v2', overlay = false, max_labels_count = 500)
 
 // ============================================================================
 // INPUTS
@@ -36,14 +43,24 @@ indicator('Contrarian Cipher B [VuManChu based]', shorttitle = 'Contrarian Ciphe
 
 // --- WaveTrend (Cipher B core) ---
 grpWT = 'WaveTrend (Cipher B core)'
-wtChannelLen  = input.int(9,  'WT Channel Length', minval = 1, group = grpWT)
-wtAverageLen  = input.int(12, 'WT Average Length', minval = 1, group = grpWT)
-wtMALen       = input.int(3,  'WT MA Length',      minval = 1, group = grpWT)
-wtMASource    = input.source(hlc3, 'WT Source', group = grpWT)
-obLevel1      = input.int(53,  'WT Overbought Level 1', group = grpWT)
-obLevel2      = input.int(60,  'WT Overbought Level 2 (extreme)', group = grpWT)
-osLevel1      = input.int(-53, 'WT Oversold Level 1', group = grpWT)
-osLevel2      = input.int(-60, 'WT Oversold Level 2 (extreme)', group = grpWT)
+wtChannelLen = input.int(9,  'WT Channel Length', minval = 1, group = grpWT)
+wtAverageLen = input.int(12, 'WT Average Length', minval = 1, group = grpWT)
+wtMALen      = input.int(3,  'WT MA Length',      minval = 1, group = grpWT)
+wtMASource   = input.source(hlc3, 'WT Source', group = grpWT)
+
+// --- Adaptive levels ---
+grpAdp = 'Adaptive OB/OS Levels'
+useAdaptive  = input.bool(true, 'Use Adaptive Levels (recommended for all timeframes)', group = grpAdp,
+     tooltip = 'Derives overbought/oversold thresholds from the recent WaveTrend distribution (percentile rank) instead of fixed levels. Self-calibrates to any timeframe and asset.')
+adaptLookback = input.int(300, 'Adaptive Lookback (bars)', minval = 50, group = grpAdp)
+adaptPct1     = input.float(85, 'Level 1 Percentile', minval = 60, maxval = 99, group = grpAdp)
+adaptPct2     = input.float(95, 'Level 2 (extreme) Percentile', minval = 70, maxval = 99.9, group = grpAdp)
+adaptFloor    = input.float(30, 'Minimum Level Magnitude (floor)', minval = 0, group = grpAdp,
+     tooltip = 'Adaptive levels never come closer to zero than this, preventing over-triggering in dead, rangebound markets.')
+obLevel1     = input.int(53,  'Fixed Overbought Level 1', group = grpAdp)
+obLevel2     = input.int(60,  'Fixed Overbought Level 2 (extreme)', group = grpAdp)
+osLevel1     = input.int(-53, 'Fixed Oversold Level 1', group = grpAdp)
+osLevel2     = input.int(-60, 'Fixed Oversold Level 2 (extreme)', group = grpAdp)
 
 // --- Money Flow ---
 grpMF = 'Money Flow (RSI-MFI)'
@@ -64,24 +81,43 @@ stochDSmooth  = input.int(3,  'Stoch D Smooth',   minval = 1, group = grpRSI)
 
 // --- Divergences ---
 grpDiv = 'Divergences'
-showWTDiv     = input.bool(true,  'Show WaveTrend Divergences', group = grpDiv)
-showRSIDiv    = input.bool(false, 'Show RSI Divergences',       group = grpDiv)
-wtDivOBLevel  = input.int(45,  'WT Bearish Div Min Level', group = grpDiv)
-wtDivOSLevel  = input.int(-65, 'WT Bullish Div Max Level', group = grpDiv)
-divUseLimits  = input.bool(true, 'Only Detect Divergences At Extremes', group = grpDiv)
+showWTDiv    = input.bool(true,  'Show WaveTrend Divergences', group = grpDiv)
+showRSIDiv   = input.bool(false, 'Show RSI Divergences',       group = grpDiv)
+divUseLimits = input.bool(true, 'Only Detect Divergences At Extremes', group = grpDiv)
+
+// --- Quality filters (v2) ---
+grpFlt = 'Quality Filters'
+useHTF    = input.bool(true, 'Higher Timeframe Confirmation', group = grpFlt,
+     tooltip = 'Blocks contrarian longs while the higher timeframe WaveTrend is overbought, and shorts while it is oversold. Aligns fades with the bigger picture.')
+htfAuto   = input.bool(true, 'Auto HTF (4x current timeframe)', group = grpFlt)
+htfManual = input.timeframe('240', 'Manual HTF', group = grpFlt)
+htfBlock  = input.float(40, 'HTF Blocking Level', minval = 0, group = grpFlt,
+     tooltip = 'Longs are blocked when the HTF WaveTrend is above this level; shorts are blocked when below its negative.')
+useADX    = input.bool(true, 'ADX Trend Filter (avoid fading strong trends)', group = grpFlt)
+adxLen    = input.int(14, 'ADX / DI Length', minval = 1, group = grpFlt)
+adxMax    = input.float(35, 'Max ADX To Allow Counter-Trend Signal', minval = 10, group = grpFlt,
+     tooltip = 'When ADX is above this AND the DI direction is against the signal, the signal is suppressed.')
+useCandleConfirm = input.bool(true, 'Require Confirmation Candle', group = grpFlt,
+     tooltip = 'A contrarian buy requires the trigger bar to close up; a sell requires it to close down. Avoids catching falling knives.')
+cooldownBars = input.int(10, 'Signal Cooldown (bars)', minval = 0, group = grpFlt,
+     tooltip = 'Minimum bars between contrarian signals in the same direction. Prevents clustered repeat losses in extended moves.')
+
+// --- Trend / stretch context ---
+grpTrd = 'Trend & Stretch Context'
+trendLen   = input.int(200, 'Baseline EMA Length', minval = 10, group = grpTrd)
+atrLen     = input.int(14,  'ATR Length', minval = 1, group = grpTrd)
+stretchMin = input.float(1.5, 'Min Stretch From EMA (ATRs) For Full Score', minval = 0, step = 0.25, group = grpTrd,
+     tooltip = 'Price must be at least this many ATRs away from the baseline EMA for the stretch component of the extremity score to activate.')
 
 // --- Contrarian engine ---
 grpCon = 'Contrarian Engine'
 conThreshold   = input.int(60, 'Crowd Extremity Score Threshold', minval = 0, maxval = 100, group = grpCon,
      tooltip = 'Minimum extremity score (0-100) required before a contrarian signal can fire. Higher = fewer, stronger signals.')
 conNeedDiv     = input.bool(false, 'Require Divergence For Contrarian Signals', group = grpCon,
-     tooltip = 'If enabled, a contrarian buy needs a recent bullish divergence and a contrarian sell needs a recent bearish divergence.')
-conDivLookback = input.int(10, 'Divergence Lookback (bars)', minval = 1, group = grpCon,
-     tooltip = 'How many bars back a divergence still counts as "recent" for signal confirmation.')
-conStreakLen   = input.int(5, 'Capitulation / Euphoria Streak (bars)', minval = 2, group = grpCon,
-     tooltip = 'Number of consecutive down (up) candles that counts as capitulation (euphoria) for the extremity score.')
-showFadeMode   = input.bool(true, 'Fade Mode: Flag Classic Signals At Extremes', group = grpCon,
-     tooltip = 'Marks classic Cipher B momentum crosses that appear at extreme levels as contrarian warnings (crowd likely late).')
+     tooltip = 'If enabled, a contrarian buy needs a recent bullish divergence and a contrarian sell needs a recent bearish divergence. Enable for maximum selectivity.')
+conDivLookback = input.int(10, 'Divergence Lookback (bars)', minval = 1, group = grpCon)
+conStreakLen   = input.int(5, 'Capitulation / Euphoria Streak (bars)', minval = 2, group = grpCon)
+showFadeMode   = input.bool(true, 'Fade Mode: Flag Classic Signals At Extremes', group = grpCon)
 showScore      = input.bool(true, 'Show Crowd Extremity Score Line', group = grpCon)
 
 // --- Display ---
@@ -93,7 +129,6 @@ showLabels         = input.bool(true, 'Show Contrarian Signal Labels', group = g
 // HELPER FUNCTIONS
 // ============================================================================
 
-// Fractal detection (same 5-bar fractal logic used by Cipher B divergences)
 f_topFractal(series float src) =>
     src[4] < src[2] and src[3] < src[2] and src[2] > src[1] and src[2] > src[0]
 
@@ -101,7 +136,7 @@ f_botFractal(series float src) =>
     src[4] > src[2] and src[3] > src[2] and src[2] < src[1] and src[2] < src[0]
 
 // Regular divergence detection on any oscillator source
-f_findDivs(series float src, float topLimit, float botLimit, bool useLimits) =>
+f_findDivs(series float src, series float topLimit, series float botLimit, bool useLimits) =>
     isTop = f_topFractal(src) and (useLimits ? src[2] >= topLimit : true)
     isBot = f_botFractal(src) and (useLimits ? src[2] <= botLimit : true)
     prevTopVal   = ta.valuewhen(isTop, src[2],  0)[2]
@@ -113,7 +148,7 @@ f_findDivs(series float src, float topLimit, float botLimit, bool useLimits) =>
     [bearDiv, bullDiv]
 
 // WaveTrend oscillator (Cipher B core)
-f_wavetrend(series float src, int chLen, int avgLen, int maLen) =>
+f_wavetrend(series float src, simple int chLen, simple int avgLen, simple int maLen) =>
     esa = ta.ema(src, chLen)
     de  = ta.ema(math.abs(src - esa), chLen)
     ci  = (src - esa) / (0.015 * de)
@@ -122,7 +157,7 @@ f_wavetrend(series float src, int chLen, int avgLen, int maLen) =>
     [wt1, wt2]
 
 // RSI-MFI hybrid money flow area (Cipher B style)
-f_rsimfi(int period, float multiplier) =>
+f_rsimfi(simple int period, simple float multiplier) =>
     candleRange = math.max(high - low, syminfo.mintick)
     ta.sma(((close - open) / candleRange) * multiplier, period)
 
@@ -132,13 +167,26 @@ f_rsimfi(int period, float multiplier) =>
 
 // WaveTrend
 [wt1, wt2] = f_wavetrend(wtMASource, wtChannelLen, wtAverageLen, wtMALen)
-wtVwap       = wt1 - wt2
-wtCrossUp    = ta.crossover(wt1, wt2)
-wtCrossDown  = ta.crossunder(wt1, wt2)
-wtOversold   = wt2 <= osLevel1
-wtOverbought = wt2 >= obLevel1
-wtExtremeOS  = wt2 <= osLevel2
-wtExtremeOB  = wt2 >= obLevel2
+wtVwap      = wt1 - wt2
+wtCrossUp   = ta.crossover(wt1, wt2)
+wtCrossDown = ta.crossunder(wt1, wt2)
+
+// Adaptive OB/OS levels: percentile of the recent WT2 distribution,
+// clamped away from zero by the floor so quiet ranges do not over-trigger.
+dynOB1 = nz(ta.percentile_nearest_rank(wt2, adaptLookback, adaptPct1), obLevel1)
+dynOB2 = nz(ta.percentile_nearest_rank(wt2, adaptLookback, adaptPct2), obLevel2)
+dynOS1 = nz(ta.percentile_nearest_rank(wt2, adaptLookback, 100 - adaptPct1), osLevel1)
+dynOS2 = nz(ta.percentile_nearest_rank(wt2, adaptLookback, 100 - adaptPct2), osLevel2)
+
+effOB1 = useAdaptive ? math.max(dynOB1,  adaptFloor) : obLevel1
+effOB2 = useAdaptive ? math.max(dynOB2,  adaptFloor) : obLevel2
+effOS1 = useAdaptive ? math.min(dynOS1, -adaptFloor) : osLevel1
+effOS2 = useAdaptive ? math.min(dynOS2, -adaptFloor) : osLevel2
+
+wtOversold   = wt2 <= effOS1
+wtOverbought = wt2 >= effOB1
+wtExtremeOS  = wt2 <= effOS2
+wtExtremeOB  = wt2 >= effOB2
 
 // Money Flow
 moneyFlow    = f_rsimfi(mfiPeriod, mfiMultiplier)
@@ -156,8 +204,8 @@ stochD   = ta.sma(stochK, stochDSmooth)
 plot(stochK, 'Stoch RSI K (hidden by default)', color = color.new(#2196f3, 100), display = display.none)
 plot(stochD, 'Stoch RSI D (hidden by default)', color = color.new(#ff9800, 100), display = display.none)
 
-// Divergences
-[wtBearDiv,  wtBullDiv]  = f_findDivs(wt2, wtDivOBLevel, wtDivOSLevel, divUseLimits)
+// Divergences (detected against the effective, adaptive extreme levels)
+[wtBearDiv,  wtBullDiv]  = f_findDivs(wt2, effOB1, effOS1, divUseLimits)
 [rsiBearDiv, rsiBullDiv] = f_findDivs(rsi, 60, 30, divUseLimits)
 
 anyBullDiv = (showWTDiv and wtBullDiv) or (showRSIDiv and rsiBullDiv)
@@ -171,6 +219,26 @@ upStreak   := close > open ? upStreak + 1   : 0
 capitulation = downStreak >= conStreakLen
 euphoria     = upStreak   >= conStreakLen
 
+// Price stretch from baseline EMA, in ATR units
+baselineEma = ta.ema(close, trendLen)
+atrVal      = ta.atr(atrLen)
+stretchAtr  = (close - baselineEma) / atrVal
+stretchedDown = stretchAtr <= -stretchMin
+stretchedUp   = stretchAtr >=  stretchMin
+
+// Higher timeframe WaveTrend confirmation
+htfTf = htfAuto ? timeframe.from_seconds(timeframe.in_seconds(timeframe.period) * 4) : htfManual
+[htfWt1, htfWt2] = request.security(syminfo.tickerid, htfTf, f_wavetrend(hlc3, wtChannelLen, wtAverageLen, wtMALen), lookahead = barmerge.lookahead_off)
+htfLongOK  = not useHTF or htfWt2 <  htfBlock
+htfShortOK = not useHTF or htfWt2 > -htfBlock
+
+// ADX trend filter: do not fade a strong trend running against the signal
+[diPlus, diMinus, adxVal] = ta.dmi(adxLen, adxLen)
+strongDownTrend = adxVal > adxMax and diMinus > diPlus
+strongUpTrend   = adxVal > adxMax and diPlus  > diMinus
+adxLongOK  = not useADX or not strongDownTrend
+adxShortOK = not useADX or not strongUpTrend
+
 // ============================================================================
 // CROWD EXTREMITY SCORE (0-100)
 // scoreOS: how extremely BEARISH the crowd is -> contrarian LONG side.
@@ -178,20 +246,22 @@ euphoria     = upStreak   >= conStreakLen
 // ============================================================================
 
 scoreOS = 0.0
-scoreOS := scoreOS + (wtOversold  ? 20 : 0)
-scoreOS := scoreOS + (wtExtremeOS ? 15 : 0)
-scoreOS := scoreOS + (rsi <= rsiOversold ? 20 : 0)
-scoreOS := scoreOS + (stochK <= 20 ? 15 : 0)
+scoreOS := scoreOS + (wtOversold  ? 15 : 0)
+scoreOS := scoreOS + (wtExtremeOS ? 10 : 0)
+scoreOS := scoreOS + (rsi <= rsiOversold ? 15 : 0)
+scoreOS := scoreOS + (stochK <= 20 ? 10 : 0)
 scoreOS := scoreOS + (mfExtremeNeg ? 15 : 0)
 scoreOS := scoreOS + (capitulation ? 15 : 0)
+scoreOS := scoreOS + (stretchedDown ? 20 : 0)
 
 scoreOB = 0.0
-scoreOB := scoreOB + (wtOverbought ? 20 : 0)
-scoreOB := scoreOB + (wtExtremeOB  ? 15 : 0)
-scoreOB := scoreOB + (rsi >= rsiOverbought ? 20 : 0)
-scoreOB := scoreOB + (stochK >= 80 ? 15 : 0)
+scoreOB := scoreOB + (wtOverbought ? 15 : 0)
+scoreOB := scoreOB + (wtExtremeOB  ? 10 : 0)
+scoreOB := scoreOB + (rsi >= rsiOverbought ? 15 : 0)
+scoreOB := scoreOB + (stochK >= 80 ? 10 : 0)
 scoreOB := scoreOB + (mfExtremePos ? 15 : 0)
 scoreOB := scoreOB + (euphoria     ? 15 : 0)
+scoreOB := scoreOB + (stretchedUp  ? 20 : 0)
 
 // Signed score for plotting: +ve = fade the bears (long), -ve = fade the bulls (short)
 crowdScore = scoreOS - scoreOB
@@ -212,17 +282,31 @@ barsSinceBearDiv := anyBearDiv ? 0 : barsSinceBearDiv + 1
 recentBullDiv = barsSinceBullDiv <= conDivLookback
 recentBearDiv = barsSinceBearDiv <= conDivLookback
 
-// Contrarian signals: fade the crowd at extremes, triggered by a WT cross back
-contrarianBuy  = wtCrossUp   and scoreOS >= conThreshold and (not conNeedDiv or recentBullDiv)
-contrarianSell = wtCrossDown and scoreOB >= conThreshold and (not conNeedDiv or recentBearDiv)
+// Cooldown per direction
+var int lastBuyBar  = -100000
+var int lastSellBar = -100000
+buyCooldownOK  = bar_index - lastBuyBar  >= cooldownBars
+sellCooldownOK = bar_index - lastSellBar >= cooldownBars
+
+// Confirmation candle
+buyCandleOK  = not useCandleConfirm or close > open
+sellCandleOK = not useCandleConfirm or close < open
+
+// Contrarian signals: fade the crowd at extremes, triggered by a WT cross back,
+// gated by every quality filter.
+contrarianBuy  = wtCrossUp   and scoreOS >= conThreshold and (not conNeedDiv or recentBullDiv) and htfLongOK  and adxLongOK  and buyCandleOK  and buyCooldownOK
+contrarianSell = wtCrossDown and scoreOB >= conThreshold and (not conNeedDiv or recentBearDiv) and htfShortOK and adxShortOK and sellCandleOK and sellCooldownOK
+
+if contrarianBuy
+    lastBuyBar := bar_index
+if contrarianSell
+    lastSellBar := bar_index
 
 // Strong variants: extremity + divergence + extreme WT level all align
 strongBuy  = contrarianBuy  and recentBullDiv and wtExtremeOS
 strongSell = contrarianSell and recentBearDiv and wtExtremeOB
 
-// Fade Mode: a classic momentum cross firing AT an extreme is a late-crowd warning.
-// A WT cross down at extreme oversold = late shorts (fade them, lean long).
-// A WT cross up at extreme overbought = late longs (fade them, lean short).
+// Fade Mode: a classic momentum cross firing AT an extreme is a late-crowd warning
 fadeWarnLong  = showFadeMode and wtCrossDown and wtExtremeOS
 fadeWarnShort = showFadeMode and wtCrossUp   and wtExtremeOB
 
@@ -239,12 +323,13 @@ colStrongB = color.new(#00ffaa, 0)
 colStrongS = color.new(#ff00aa, 0)
 colScore   = color.new(#b388ff, 0)
 
-// Zero line & OB/OS guides
 hline(0, 'Zero', color = color.new(color.gray, 60))
-hline(obLevel1, 'Overbought 1', color = color.new(#ff5252, 75))
-hline(obLevel2, 'Overbought 2', color = color.new(#ff5252, 60), linestyle = hline.style_dotted)
-hline(osLevel1, 'Oversold 1',   color = color.new(#00e676, 75))
-hline(osLevel2, 'Oversold 2',   color = color.new(#00e676, 60), linestyle = hline.style_dotted)
+
+// Effective (adaptive or fixed) OB/OS levels
+plot(effOB1, 'Overbought 1 (effective)', color = color.new(#ff5252, 75))
+plot(effOB2, 'Overbought 2 (effective)', color = color.new(#ff5252, 60), style = plot.style_circles)
+plot(effOS1, 'Oversold 1 (effective)',   color = color.new(#00e676, 75))
+plot(effOS2, 'Oversold 2 (effective)',   color = color.new(#00e676, 60), style = plot.style_circles)
 
 // WaveTrend waves
 plot(wt1, 'WT Wave 1', color = colWT1, style = plot.style_area)
@@ -259,6 +344,9 @@ plot((rsi - 50) * 2, 'RSI (scaled)', color = color.new(#ce93d8, 60))
 
 // Crowd extremity score (signed)
 plot(showScore ? crowdScore : na, 'Crowd Extremity Score', color = colScore, style = plot.style_stepline, linewidth = 1)
+
+// HTF WaveTrend context (hidden by default)
+plot(htfWt2, 'HTF WT2 (hidden by default)', color = color.new(#ffab40, 100), display = display.none)
 
 // Classic Cipher B circles
 plotshape(showClassicCircles and classicBuy  ? wt2 : na, 'Classic Buy Circle',  style = shape.circle, location = location.absolute, color = color.new(#00e676, 25), size = size.tiny)
@@ -280,9 +368,9 @@ plotshape(fadeWarnShort, 'Fade Warning (lean short)', style = shape.diamond, loc
 
 // Labels for strong signals
 if showLabels and strongBuy
-    label.new(bar_index, osLevel2 - 15, 'FADE THE PANIC\nStrong Buy', style = label.style_label_up, color = color.new(#00e676, 20), textcolor = color.white, size = size.small)
+    label.new(bar_index, effOS2 - 15, 'FADE THE PANIC\nStrong Buy', style = label.style_label_up, color = color.new(#00e676, 20), textcolor = color.white, size = size.small)
 if showLabels and strongSell
-    label.new(bar_index, obLevel2 + 15, 'FADE THE EUPHORIA\nStrong Sell', style = label.style_label_down, color = color.new(#ff5252, 20), textcolor = color.white, size = size.small)
+    label.new(bar_index, effOB2 + 15, 'FADE THE EUPHORIA\nStrong Sell', style = label.style_label_down, color = color.new(#ff5252, 20), textcolor = color.white, size = size.small)
 
 // Background tint at extreme crowd readings
 bgcolor(scoreOS >= conThreshold ? color.new(#00e676, 92) : scoreOB >= conThreshold ? color.new(#ff5252, 92) : na)
@@ -291,8 +379,8 @@ bgcolor(scoreOS >= conThreshold ? color.new(#00e676, 92) : scoreOB >= conThresho
 // ALERTS
 // ============================================================================
 
-alertcondition(contrarianBuy,  'Contrarian Buy',         'Contrarian Cipher B: BUY — crowd extremely bearish, WaveTrend crossed up. Fade the panic.')
-alertcondition(contrarianSell, 'Contrarian Sell',        'Contrarian Cipher B: SELL — crowd extremely bullish, WaveTrend crossed down. Fade the euphoria.')
+alertcondition(contrarianBuy,  'Contrarian Buy',         'Contrarian Cipher B: BUY — crowd extremely bearish, filters aligned, WaveTrend crossed up. Fade the panic.')
+alertcondition(contrarianSell, 'Contrarian Sell',        'Contrarian Cipher B: SELL — crowd extremely bullish, filters aligned, WaveTrend crossed down. Fade the euphoria.')
 alertcondition(strongBuy,      'Strong Contrarian Buy',  'Contrarian Cipher B: STRONG BUY — extreme oversold + bullish divergence + WT cross up.')
 alertcondition(strongSell,     'Strong Contrarian Sell', 'Contrarian Cipher B: STRONG SELL — extreme overbought + bearish divergence + WT cross down.')
 alertcondition(wtBullDiv,      'WT Bullish Divergence',  'Contrarian Cipher B: bullish divergence on WaveTrend.')

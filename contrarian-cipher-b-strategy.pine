@@ -1,0 +1,294 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0
+// https://mozilla.org/MPL/2.0/
+//
+// Contrarian Cipher B v2 — STRATEGY
+// ---------------------------------
+// Backtestable version of the Contrarian Cipher B v2 indicator. Same signal
+// engine (VuManChu Cipher B core + contrarian layer + v2 quality filters),
+// wrapped in a strategy with ATR-based stops and mean-reversion targets, so
+// the winrate and expectancy can be MEASURED in the Strategy Tester on any
+// symbol and any timeframe.
+//
+// Suggested workflow:
+//   1. Add to chart, open the Strategy Tester tab.
+//   2. Check "Percent Profitable" and "Profit Factor" on your symbol/TF.
+//   3. Tune the Contrarian Engine threshold and Quality Filters. Higher
+//      threshold + divergence requirement = fewer trades, higher winrate.
+//   4. Winrate alone is meaningless without the risk/reward — a 70% winrate
+//      losing 3R per loss still loses money. Watch Profit Factor.
+//
+// Credits: WaveTrend / Cipher B concepts by VuManChu (Cipher B Divergences),
+// building on LazyBear's WaveTrend oscillator.
+
+//@version=6
+strategy('Contrarian Cipher B v2 Strategy', shorttitle = 'CCB v2 Strat', overlay = true,
+     initial_capital = 10000,
+     default_qty_type = strategy.percent_of_equity, default_qty_value = 10,
+     commission_type = strategy.commission.percent, commission_value = 0.05,
+     process_orders_on_close = true, calc_on_every_tick = false, max_labels_count = 500)
+
+// ============================================================================
+// INPUTS
+// ============================================================================
+
+// --- Trade settings ---
+grpTrade = 'Trade Settings'
+tradeDirection = input.string('Both', 'Trade Direction', options = ['Both', 'Long Only', 'Short Only'], group = grpTrade)
+atrStopMult    = input.float(2.0, 'Stop Loss (ATR multiple)',   minval = 0.5, step = 0.25, group = grpTrade)
+atrTargetMult  = input.float(2.0, 'Take Profit (ATR multiple)', minval = 0.25, step = 0.25, group = grpTrade)
+useMeanRevExit = input.bool(true, 'Exit When WaveTrend Reverts To Zero', group = grpTrade,
+     tooltip = 'Mean-reversion trades target the mean: close the position once WaveTrend crosses back through zero, even if the ATR target is not hit. Usually raises winrate.')
+maxBarsInTrade = input.int(50, 'Time Stop (bars, 0 = off)', minval = 0, group = grpTrade)
+
+// --- WaveTrend (Cipher B core) ---
+grpWT = 'WaveTrend (Cipher B core)'
+wtChannelLen = input.int(9,  'WT Channel Length', minval = 1, group = grpWT)
+wtAverageLen = input.int(12, 'WT Average Length', minval = 1, group = grpWT)
+wtMALen      = input.int(3,  'WT MA Length',      minval = 1, group = grpWT)
+wtMASource   = input.source(hlc3, 'WT Source', group = grpWT)
+
+// --- Adaptive levels ---
+grpAdp = 'Adaptive OB/OS Levels'
+useAdaptive   = input.bool(true, 'Use Adaptive Levels (recommended for all timeframes)', group = grpAdp)
+adaptLookback = input.int(300, 'Adaptive Lookback (bars)', minval = 50, group = grpAdp)
+adaptPct1     = input.float(85, 'Level 1 Percentile', minval = 60, maxval = 99, group = grpAdp)
+adaptPct2     = input.float(95, 'Level 2 (extreme) Percentile', minval = 70, maxval = 99.9, group = grpAdp)
+adaptFloor    = input.float(30, 'Minimum Level Magnitude (floor)', minval = 0, group = grpAdp)
+obLevel1      = input.int(53,  'Fixed Overbought Level 1', group = grpAdp)
+obLevel2      = input.int(60,  'Fixed Overbought Level 2 (extreme)', group = grpAdp)
+osLevel1      = input.int(-53, 'Fixed Oversold Level 1', group = grpAdp)
+osLevel2      = input.int(-60, 'Fixed Oversold Level 2 (extreme)', group = grpAdp)
+
+// --- Money Flow ---
+grpMF = 'Money Flow (RSI-MFI)'
+mfiPeriod     = input.int(60,      'MFI Period', minval = 1, group = grpMF)
+mfiMultiplier = input.float(150.0, 'MFI Area Multiplier', step = 10, group = grpMF)
+mfiExtreme    = input.float(15.0,  'MFI Extreme Threshold', minval = 0, group = grpMF)
+
+// --- RSI / Stoch RSI ---
+grpRSI = 'RSI & Stochastic RSI'
+rsiLen        = input.int(14, 'RSI Length',    minval = 1, group = grpRSI)
+rsiOversold   = input.int(30, 'RSI Oversold',   maxval = 50, group = grpRSI)
+rsiOverbought = input.int(60, 'RSI Overbought', minval = 50, group = grpRSI)
+stochUseLog   = input.bool(true, 'Stoch RSI: Use Log Scale', group = grpRSI)
+stochLen      = input.int(14, 'Stoch Length',     minval = 1, group = grpRSI)
+stochRsiLen   = input.int(14, 'Stoch RSI Length', minval = 1, group = grpRSI)
+stochKSmooth  = input.int(3,  'Stoch K Smooth',   minval = 1, group = grpRSI)
+
+// --- Divergences ---
+grpDiv = 'Divergences'
+useWTDiv     = input.bool(true,  'Use WaveTrend Divergences', group = grpDiv)
+useRSIDiv    = input.bool(false, 'Use RSI Divergences',       group = grpDiv)
+divUseLimits = input.bool(true,  'Only Detect Divergences At Extremes', group = grpDiv)
+
+// --- Quality filters ---
+grpFlt = 'Quality Filters'
+useHTF    = input.bool(true, 'Higher Timeframe Confirmation', group = grpFlt)
+htfAuto   = input.bool(true, 'Auto HTF (4x current timeframe)', group = grpFlt)
+htfManual = input.timeframe('240', 'Manual HTF', group = grpFlt)
+htfBlock  = input.float(40, 'HTF Blocking Level', minval = 0, group = grpFlt)
+useADX    = input.bool(true, 'ADX Trend Filter', group = grpFlt)
+adxLen    = input.int(14, 'ADX / DI Length', minval = 1, group = grpFlt)
+adxMax    = input.float(35, 'Max ADX To Allow Counter-Trend Signal', minval = 10, group = grpFlt)
+useCandleConfirm = input.bool(true, 'Require Confirmation Candle', group = grpFlt)
+cooldownBars     = input.int(10, 'Signal Cooldown (bars)', minval = 0, group = grpFlt)
+
+// --- Trend / stretch context ---
+grpTrd = 'Trend & Stretch Context'
+trendLen   = input.int(200, 'Baseline EMA Length', minval = 10, group = grpTrd)
+atrLen     = input.int(14,  'ATR Length', minval = 1, group = grpTrd)
+stretchMin = input.float(1.5, 'Min Stretch From EMA (ATRs)', minval = 0, step = 0.25, group = grpTrd)
+
+// --- Contrarian engine ---
+grpCon = 'Contrarian Engine'
+conThreshold   = input.int(60, 'Crowd Extremity Score Threshold', minval = 0, maxval = 100, group = grpCon)
+conNeedDiv     = input.bool(false, 'Require Divergence For Signals', group = grpCon)
+conDivLookback = input.int(10, 'Divergence Lookback (bars)', minval = 1, group = grpCon)
+conStreakLen   = input.int(5,  'Capitulation / Euphoria Streak (bars)', minval = 2, group = grpCon)
+
+// ============================================================================
+// HELPER FUNCTIONS (identical to the indicator)
+// ============================================================================
+
+f_topFractal(series float src) =>
+    src[4] < src[2] and src[3] < src[2] and src[2] > src[1] and src[2] > src[0]
+
+f_botFractal(series float src) =>
+    src[4] > src[2] and src[3] > src[2] and src[2] < src[1] and src[2] < src[0]
+
+f_findDivs(series float src, series float topLimit, series float botLimit, bool useLimits) =>
+    isTop = f_topFractal(src) and (useLimits ? src[2] >= topLimit : true)
+    isBot = f_botFractal(src) and (useLimits ? src[2] <= botLimit : true)
+    prevTopVal   = ta.valuewhen(isTop, src[2],  0)[2]
+    prevTopPrice = ta.valuewhen(isTop, high[2], 0)[2]
+    prevBotVal   = ta.valuewhen(isBot, src[2],  0)[2]
+    prevBotPrice = ta.valuewhen(isBot, low[2],  0)[2]
+    bearDiv = isTop and high[2] > prevTopPrice and src[2] < prevTopVal
+    bullDiv = isBot and low[2]  < prevBotPrice and src[2] > prevBotVal
+    [bearDiv, bullDiv]
+
+f_wavetrend(series float src, simple int chLen, simple int avgLen, simple int maLen) =>
+    esa = ta.ema(src, chLen)
+    de  = ta.ema(math.abs(src - esa), chLen)
+    ci  = (src - esa) / (0.015 * de)
+    wt1 = ta.ema(ci, avgLen)
+    wt2 = ta.sma(wt1, maLen)
+    [wt1, wt2]
+
+f_rsimfi(simple int period, simple float multiplier) =>
+    candleRange = math.max(high - low, syminfo.mintick)
+    ta.sma(((close - open) / candleRange) * multiplier, period)
+
+// ============================================================================
+// SIGNAL ENGINE (identical to the indicator)
+// ============================================================================
+
+[wt1, wt2] = f_wavetrend(wtMASource, wtChannelLen, wtAverageLen, wtMALen)
+wtCrossUp   = ta.crossover(wt1, wt2)
+wtCrossDown = ta.crossunder(wt1, wt2)
+
+dynOB1 = nz(ta.percentile_nearest_rank(wt2, adaptLookback, adaptPct1), obLevel1)
+dynOB2 = nz(ta.percentile_nearest_rank(wt2, adaptLookback, adaptPct2), obLevel2)
+dynOS1 = nz(ta.percentile_nearest_rank(wt2, adaptLookback, 100 - adaptPct1), osLevel1)
+dynOS2 = nz(ta.percentile_nearest_rank(wt2, adaptLookback, 100 - adaptPct2), osLevel2)
+
+effOB1 = useAdaptive ? math.max(dynOB1,  adaptFloor) : obLevel1
+effOB2 = useAdaptive ? math.max(dynOB2,  adaptFloor) : obLevel2
+effOS1 = useAdaptive ? math.min(dynOS1, -adaptFloor) : osLevel1
+effOS2 = useAdaptive ? math.min(dynOS2, -adaptFloor) : osLevel2
+
+wtOversold   = wt2 <= effOS1
+wtOverbought = wt2 >= effOB1
+wtExtremeOS  = wt2 <= effOS2
+wtExtremeOB  = wt2 >= effOB2
+
+moneyFlow    = f_rsimfi(mfiPeriod, mfiMultiplier)
+mfExtremeNeg = moneyFlow <= -mfiExtreme
+mfExtremePos = moneyFlow >=  mfiExtreme
+
+rsi = ta.rsi(close, rsiLen)
+
+stochSrc = stochUseLog ? math.log(close) : close
+stochRsi = ta.rsi(stochSrc, stochRsiLen)
+stochK   = ta.sma(ta.stoch(stochRsi, stochRsi, stochRsi, stochLen), stochKSmooth)
+
+[wtBearDiv,  wtBullDiv]  = f_findDivs(wt2, effOB1, effOS1, divUseLimits)
+[rsiBearDiv, rsiBullDiv] = f_findDivs(rsi, 60, 30, divUseLimits)
+anyBullDiv = (useWTDiv and wtBullDiv) or (useRSIDiv and rsiBullDiv)
+anyBearDiv = (useWTDiv and wtBearDiv) or (useRSIDiv and rsiBearDiv)
+
+var int downStreak = 0
+var int upStreak   = 0
+downStreak := close < open ? downStreak + 1 : 0
+upStreak   := close > open ? upStreak + 1   : 0
+capitulation = downStreak >= conStreakLen
+euphoria     = upStreak   >= conStreakLen
+
+baselineEma = ta.ema(close, trendLen)
+atrVal      = ta.atr(atrLen)
+stretchAtr  = (close - baselineEma) / atrVal
+stretchedDown = stretchAtr <= -stretchMin
+stretchedUp   = stretchAtr >=  stretchMin
+
+htfTf = htfAuto ? timeframe.from_seconds(timeframe.in_seconds(timeframe.period) * 4) : htfManual
+[htfWt1, htfWt2] = request.security(syminfo.tickerid, htfTf, f_wavetrend(hlc3, wtChannelLen, wtAverageLen, wtMALen), lookahead = barmerge.lookahead_off)
+htfLongOK  = not useHTF or htfWt2 <  htfBlock
+htfShortOK = not useHTF or htfWt2 > -htfBlock
+
+[diPlus, diMinus, adxVal] = ta.dmi(adxLen, adxLen)
+adxLongOK  = not useADX or not (adxVal > adxMax and diMinus > diPlus)
+adxShortOK = not useADX or not (adxVal > adxMax and diPlus  > diMinus)
+
+scoreOS = 0.0
+scoreOS := scoreOS + (wtOversold  ? 15 : 0)
+scoreOS := scoreOS + (wtExtremeOS ? 10 : 0)
+scoreOS := scoreOS + (rsi <= rsiOversold ? 15 : 0)
+scoreOS := scoreOS + (stochK <= 20 ? 10 : 0)
+scoreOS := scoreOS + (mfExtremeNeg ? 15 : 0)
+scoreOS := scoreOS + (capitulation ? 15 : 0)
+scoreOS := scoreOS + (stretchedDown ? 20 : 0)
+
+scoreOB = 0.0
+scoreOB := scoreOB + (wtOverbought ? 15 : 0)
+scoreOB := scoreOB + (wtExtremeOB  ? 10 : 0)
+scoreOB := scoreOB + (rsi >= rsiOverbought ? 15 : 0)
+scoreOB := scoreOB + (stochK >= 80 ? 10 : 0)
+scoreOB := scoreOB + (mfExtremePos ? 15 : 0)
+scoreOB := scoreOB + (euphoria     ? 15 : 0)
+scoreOB := scoreOB + (stretchedUp  ? 20 : 0)
+
+var int barsSinceBullDiv = 100000
+var int barsSinceBearDiv = 100000
+barsSinceBullDiv := anyBullDiv ? 0 : barsSinceBullDiv + 1
+barsSinceBearDiv := anyBearDiv ? 0 : barsSinceBearDiv + 1
+recentBullDiv = barsSinceBullDiv <= conDivLookback
+recentBearDiv = barsSinceBearDiv <= conDivLookback
+
+var int lastBuyBar  = -100000
+var int lastSellBar = -100000
+buyCooldownOK  = bar_index - lastBuyBar  >= cooldownBars
+sellCooldownOK = bar_index - lastSellBar >= cooldownBars
+
+buyCandleOK  = not useCandleConfirm or close > open
+sellCandleOK = not useCandleConfirm or close < open
+
+contrarianBuy  = wtCrossUp   and scoreOS >= conThreshold and (not conNeedDiv or recentBullDiv) and htfLongOK  and adxLongOK  and buyCandleOK  and buyCooldownOK
+contrarianSell = wtCrossDown and scoreOB >= conThreshold and (not conNeedDiv or recentBearDiv) and htfShortOK and adxShortOK and sellCandleOK and sellCooldownOK
+
+if contrarianBuy
+    lastBuyBar := bar_index
+if contrarianSell
+    lastSellBar := bar_index
+
+// ============================================================================
+// ORDERS
+// ============================================================================
+
+allowLong  = tradeDirection != 'Short Only'
+allowShort = tradeDirection != 'Long Only'
+
+var float entryAtr = na
+
+if contrarianBuy and allowLong and strategy.position_size <= 0
+    entryAtr := atrVal
+    strategy.entry('Long', strategy.long)
+
+if contrarianSell and allowShort and strategy.position_size >= 0
+    entryAtr := atrVal
+    strategy.entry('Short', strategy.short)
+
+if strategy.position_size > 0
+    strategy.exit('Long SL/TP', 'Long',
+         stop  = strategy.position_avg_price - atrStopMult   * entryAtr,
+         limit = strategy.position_avg_price + atrTargetMult * entryAtr)
+    // Mean-reversion target reached: oscillator back at/above the mean
+    if useMeanRevExit and ta.crossover(wt2, 0)
+        strategy.close('Long', comment = 'WT mean revert')
+    if maxBarsInTrade > 0 and bar_index - strategy.opentrades.entry_bar_index(strategy.opentrades - 1) >= maxBarsInTrade
+        strategy.close('Long', comment = 'Time stop')
+
+if strategy.position_size < 0
+    strategy.exit('Short SL/TP', 'Short',
+         stop  = strategy.position_avg_price + atrStopMult   * entryAtr,
+         limit = strategy.position_avg_price - atrTargetMult * entryAtr)
+    if useMeanRevExit and ta.crossunder(wt2, 0)
+        strategy.close('Short', comment = 'WT mean revert')
+    if maxBarsInTrade > 0 and bar_index - strategy.opentrades.entry_bar_index(strategy.opentrades - 1) >= maxBarsInTrade
+        strategy.close('Short', comment = 'Time stop')
+
+// ============================================================================
+// CHART VISUALS
+// ============================================================================
+
+plot(baselineEma, 'Baseline EMA', color = color.new(#78909c, 40))
+plotshape(contrarianBuy,  'Contrarian Buy',  style = shape.triangleup,   location = location.belowbar, color = color.new(#00e676, 0), size = size.small)
+plotshape(contrarianSell, 'Contrarian Sell', style = shape.triangledown, location = location.abovebar, color = color.new(#ff5252, 0), size = size.small)
+
+longStopLine  = strategy.position_size > 0 ? strategy.position_avg_price - atrStopMult   * entryAtr : na
+longTgtLine   = strategy.position_size > 0 ? strategy.position_avg_price + atrTargetMult * entryAtr : na
+shortStopLine = strategy.position_size < 0 ? strategy.position_avg_price + atrStopMult   * entryAtr : na
+shortTgtLine  = strategy.position_size < 0 ? strategy.position_avg_price - atrTargetMult * entryAtr : na
+plot(longStopLine,  'Long Stop',    color = color.new(#ff5252, 30), style = plot.style_linebr)
+plot(longTgtLine,   'Long Target',  color = color.new(#00e676, 30), style = plot.style_linebr)
+plot(shortStopLine, 'Short Stop',   color = color.new(#ff5252, 30), style = plot.style_linebr)
+plot(shortTgtLine,  'Short Target', color = color.new(#00e676, 30), style = plot.style_linebr)

@@ -1,9 +1,17 @@
 # my-new-project
 A demonstration project for GitHub repository creation workflow
 
-## Contrarian Cipher B — TradingView Indicator
+## Contrarian Cipher B v2 — TradingView Indicator
 
-`contrarian-cipher-b.pine` is a Pine Script v6 indicator that combines the core engine of the latest public **VuManChu Cipher B (Divergences)** with a **contrarian signal layer** that fades crowd extremes.
+`contrarian-cipher-b.pine` is a Pine Script v6 indicator that combines the core engine of the latest public **VuManChu Cipher B (Divergences)** with a **contrarian signal layer** that fades crowd extremes. `contrarian-cipher-b-strategy.pine` is the backtestable strategy version of the same engine, so the winrate can be measured in TradingView's Strategy Tester on any symbol and timeframe.
+
+### v2 quality upgrades (signal quality across all timeframes)
+
+- **Adaptive OB/OS levels** — WaveTrend thresholds are derived from the recent distribution (percentile rank) instead of fixed ±53/±60, so the indicator self-calibrates to any timeframe and asset. A floor prevents over-triggering in dead ranges.
+- **Higher-timeframe confirmation** — contrarian longs are blocked while the higher-timeframe WaveTrend is still overbought (and vice versa). Auto mode uses 4× the chart timeframe.
+- **ADX trend filter** — signals are suppressed when a strong trend (high ADX with DI direction against the trade) is running them over.
+- **Price stretch component** — distance from a 200 EMA measured in ATRs feeds the extremity score, so signals need genuine overextension.
+- **Confirmation candle + signal cooldown** — avoids catching falling knives and clustered repeat losses.
 
 ### What's inside
 
@@ -44,6 +52,13 @@ A demonstration project for GitHub repository creation workflow
 | Yellow diamond | Fade-mode warning: late crowd entering at an extreme |
 | Green/red circle on the wave | Classic Cipher B momentum signal |
 | `Bull Div` / `Bear Div` label | Regular divergence on WaveTrend |
+
+### Backtesting the winrate
+
+1. Paste `contrarian-cipher-b-strategy.pine` into the Pine Editor and add it to the chart.
+2. Open the **Strategy Tester** tab and check *Percent Profitable* and *Profit Factor* for your symbol/timeframe.
+3. To push winrate up: raise the `Crowd Extremity Score Threshold`, enable `Require Divergence For Signals`, and keep `Exit When WaveTrend Reverts To Zero` on (mean-reversion exits close winners early and often).
+4. Winrate alone is not profitability — a high winrate with oversized losses still loses money. Always evaluate Profit Factor and max drawdown alongside it.
 
 ### Disclaimer
 
