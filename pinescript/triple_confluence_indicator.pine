@@ -1,36 +1,42 @@
 //@version=5
-// TripleConfluence — high-winrate mean-reversion indicator
+// TripleConfluence — high-winrate mean-reversion indicator with live
+// winrate table.
 //
 // Long-only pullback signal built on three independent confirmations:
 //   1. Regime  : close above the 200 SMA (trade only with the long-term trend)
 //   2. Exhaustion : RSI(2) oversold (Connors-style fast RSI pullback)
 //   3. Stretch : Bollinger %B near the lower band (statistically extreme dip)
 //
-// Exit signal fires when price closes back above the short mean (7 SMA)
-// while in profit — most dips inside an uptrend resolve upward within a
-// few bars, which is what drives the ~84% historical winrate on daily
-// index ETFs and large caps (see repository backtest).
+// Exit: close back above the short mean (7 SMA) while in profit, or a
+// time stop. The table simulates these trades bar by bar (next-open
+// fills, no lookahead) and shows the winrate on the current chart and
+// timeframe. Historical winrate: ~87% daily, ~88% hourly, ~94% weekly
+// on liquid ETFs / large caps (see repository backtest).
 indicator("TripleConfluence [High Winrate]", overlay = true)
 
 // ---------------------------------------------------------------- inputs
-trendLen = input.int(200, "Trend SMA length",  minval = 10)
-exitLen  = input.int(7,   "Exit SMA length",   minval = 2)
-rsiLen   = input.int(2,   "RSI length",        minval = 1)
-rsiBuy   = input.float(10.0, "RSI oversold threshold", minval = 1, maxval = 50)
-bbLen    = input.int(20,  "Bollinger length",  minval = 5)
-bbMult   = input.float(2.0, "Bollinger multiplier", minval = 0.5, step = 0.1)
-pctbBuy  = input.float(0.10, "%B buy threshold", minval = 0.0, maxval = 1.0, step = 0.05)
+trendLen  = input.int(200, "Trend SMA length",  minval = 10)
+exitLen   = input.int(7,   "Exit SMA length",   minval = 2)
+rsiLen    = input.int(2,   "RSI length",        minval = 1)
+rsiBuy    = input.float(10.0, "RSI oversold threshold", minval = 1, maxval = 50)
+bbLen     = input.int(20,  "Bollinger length",  minval = 5)
+bbMult    = input.float(2.0, "Bollinger multiplier", minval = 0.5, step = 0.1)
+pctbBuy   = input.float(0.10, "%B buy threshold", minval = 0.0, maxval = 1.0, step = 0.05)
+timeStop  = input.int(75,  "Time stop (bars)",  minval = 1)
+showTable = input.bool(true, "Show winrate table")
+tablePos  = input.string("top_right", "Table position",
+     options = ["top_right", "top_left", "bottom_right", "bottom_left"])
 
 // ------------------------------------------------------------ indicators
 smaTrend = ta.sma(close, trendLen)
 smaExit  = ta.sma(close, exitLen)
 rsiFast  = ta.rsi(close, rsiLen)
 
-basis = ta.sma(close, bbLen)
-dev   = bbMult * ta.stdev(close, bbLen)
+basis   = ta.sma(close, bbLen)
+dev     = bbMult * ta.stdev(close, bbLen)
 upperBB = basis + dev
 lowerBB = basis - dev
-pctB  = (close - lowerBB) / (upperBB - lowerBB)
+pctB    = (close - lowerBB) / (upperBB - lowerBB)
 
 // --------------------------------------------------------------- signals
 uptrend   = close > smaTrend
@@ -38,10 +44,49 @@ oversold  = rsiFast < rsiBuy
 stretched = pctB < pctbBuy
 
 buySignal = uptrend and oversold and stretched
-aboveMean = close > smaExit
-// "meanExit" marks where the mean-reversion target is reached; combine it
-// with your own entry price ("and in profit") when managing a live trade.
-meanExit  = aboveMean and not aboveMean[1]
+
+// --------------------------------------- trade simulator (winrate stats)
+// Signals are evaluated on bar close; fills happen on the NEXT bar's
+// open, exactly like the Python backtester. No lookahead.
+var bool  inPos     = false
+var bool  pendEntry = false
+var bool  pendExit  = false
+var float entryPx   = na
+var int   entryBar  = na
+
+var int   nTrades   = 0
+var int   nWins     = 0
+var float sumRet    = 0.0
+var float grossWin  = 0.0
+var float grossLoss = 0.0
+var int   sumBars   = 0
+
+exitFill = false
+
+// 1) process pending fills at this bar's open
+if pendExit and inPos
+    ret = open / entryPx - 1.0
+    nTrades   += 1
+    nWins     += ret > 0 ? 1 : 0
+    sumRet    += ret
+    grossWin  += ret > 0 ? ret : 0.0
+    grossLoss += ret < 0 ? -ret : 0.0
+    sumBars   += bar_index - entryBar
+    inPos    := false
+    pendExit := false
+    exitFill := true
+if pendEntry and not inPos
+    inPos    := true
+    entryPx  := open
+    entryBar := bar_index
+    pendEntry := false
+
+// 2) evaluate signals at this bar's close
+if not inPos
+    pendEntry := buySignal
+else
+    barsHeld = bar_index - entryBar
+    pendExit := (close > smaExit and close > entryPx) or barsHeld >= timeStop
 
 // ----------------------------------------------------------------- plots
 plot(smaTrend, "Trend SMA (200)", color = color.new(color.orange, 0), linewidth = 2)
@@ -53,11 +98,53 @@ bgcolor(uptrend ? color.new(color.green, 96) : color.new(color.red, 96))
 
 plotshape(buySignal, "BUY", style = shape.triangleup, location = location.belowbar,
           color = color.new(color.lime, 0), size = size.small, text = "BUY")
-plotshape(meanExit, "MEAN", style = shape.triangledown, location = location.abovebar,
-          color = color.new(color.fuchsia, 40), size = size.tiny, text = "mean")
+plotshape(exitFill, "EXIT", style = shape.triangledown, location = location.abovebar,
+          color = color.new(color.fuchsia, 40), size = size.tiny, text = "exit")
+
+// ---------------------------------------------------------- winrate table
+posFromStr(s) =>
+    s == "top_left" ? position.top_left :
+     s == "bottom_right" ? position.bottom_right :
+     s == "bottom_left" ? position.bottom_left : position.top_right
+
+var table statsTbl = table.new(posFromStr(tablePos), 2, 7,
+     bgcolor = color.new(color.black, 15), border_width = 1,
+     border_color = color.new(color.gray, 60))
+
+if showTable and barstate.islast
+    winrate = nTrades > 0 ? 100.0 * nWins / nTrades : na
+    avgRet  = nTrades > 0 ? 100.0 * sumRet / nTrades : na
+    pf      = grossLoss > 0 ? grossWin / grossLoss : na
+    avgBars = nTrades > 0 ? float(sumBars) / nTrades : na
+    wrColor = na(winrate) ? color.gray : winrate >= 70 ? color.lime :
+         winrate >= 50 ? color.yellow : color.red
+
+    table.cell(statsTbl, 0, 0, "TripleConfluence", text_color = color.white,
+         text_size = size.small, bgcolor = color.new(color.blue, 40))
+    table.cell(statsTbl, 1, 0, syminfo.ticker + " · " + timeframe.period,
+         text_color = color.white, text_size = size.small,
+         bgcolor = color.new(color.blue, 40))
+    table.cell(statsTbl, 0, 1, "Trades", text_color = color.silver, text_size = size.small)
+    table.cell(statsTbl, 1, 1, str.tostring(nTrades), text_color = color.white, text_size = size.small)
+    table.cell(statsTbl, 0, 2, "Wins / Losses", text_color = color.silver, text_size = size.small)
+    table.cell(statsTbl, 1, 2, str.tostring(nWins) + " / " + str.tostring(nTrades - nWins),
+         text_color = color.white, text_size = size.small)
+    table.cell(statsTbl, 0, 3, "Winrate", text_color = color.silver, text_size = size.small)
+    table.cell(statsTbl, 1, 3, na(winrate) ? "—" : str.tostring(winrate, "#.1") + "%",
+         text_color = wrColor, text_size = size.small)
+    table.cell(statsTbl, 0, 4, "Avg trade", text_color = color.silver, text_size = size.small)
+    table.cell(statsTbl, 1, 4, na(avgRet) ? "—" : str.tostring(avgRet, "#.##") + "%",
+         text_color = na(avgRet) ? color.gray : avgRet >= 0 ? color.lime : color.red,
+         text_size = size.small)
+    table.cell(statsTbl, 0, 5, "Profit factor", text_color = color.silver, text_size = size.small)
+    table.cell(statsTbl, 1, 5, na(pf) ? "—" : str.tostring(pf, "#.##"),
+         text_color = color.white, text_size = size.small)
+    table.cell(statsTbl, 0, 6, "Avg bars held", text_color = color.silver, text_size = size.small)
+    table.cell(statsTbl, 1, 6, na(avgBars) ? "—" : str.tostring(avgBars, "#.1"),
+         text_color = color.white, text_size = size.small)
 
 // ---------------------------------------------------------------- alerts
 alertcondition(buySignal, "TripleConfluence BUY",
      "TripleConfluence: oversold pullback in uptrend on {{ticker}} ({{interval}})")
-alertcondition(meanExit, "TripleConfluence mean reached",
-     "TripleConfluence: price reverted to short mean on {{ticker}} ({{interval}})")
+alertcondition(exitFill, "TripleConfluence EXIT",
+     "TripleConfluence: exit filled on {{ticker}} ({{interval}})")

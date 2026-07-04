@@ -3,9 +3,9 @@
 // Strategy Tester. Same logic as the indicator, with the full exit rule:
 // close above the short mean AND above entry price, or a time stop.
 //
-// Recommended: daily bars on liquid index ETFs / large caps (SPY, QQQ,
-// DIA, XLK, MSFT, ...). Historical winrate ~84% (2005-2026, 10-symbol
-// basket, next-open fills — see repository backtest).
+// Recommended: liquid index ETFs / large caps (SPY, QQQ, DIA, XLK,
+// MSFT, ...). Historical winrate ~87% daily, ~88% hourly, ~94% weekly
+// (10-symbol baskets, next-open fills — see repository backtest).
 strategy("TripleConfluence [High Winrate]", overlay = true,
      initial_capital = 100000,
      default_qty_type = strategy.percent_of_equity, default_qty_value = 100,
@@ -19,7 +19,7 @@ rsiBuy   = input.float(10.0, "RSI oversold threshold", minval = 1, maxval = 50)
 bbLen    = input.int(20,  "Bollinger length",  minval = 5)
 bbMult   = input.float(2.0, "Bollinger multiplier", minval = 0.5, step = 0.1)
 pctbBuy  = input.float(0.10, "%B buy threshold", minval = 0.0, maxval = 1.0, step = 0.05)
-timeStop = input.int(30,  "Time stop (bars)",  minval = 1)
+timeStop = input.int(75,  "Time stop (bars)",  minval = 1)
 
 // ------------------------------------------------------------ indicators
 smaTrend = ta.sma(close, trendLen)

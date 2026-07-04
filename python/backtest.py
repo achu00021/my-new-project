@@ -3,8 +3,10 @@ Backtest the TripleConfluence indicator on real daily data (via yfinance)
 and report winrate, profit factor, and other stats per symbol.
 
 Usage:
-    python3 backtest.py                    # default symbol basket
-    python3 backtest.py SPY QQQ AAPL       # custom symbols
+    python3 backtest.py                          # default basket, daily
+    python3 backtest.py SPY QQQ AAPL             # custom symbols, daily
+    python3 backtest.py --interval=1h            # hourly (max ~730 days)
+    python3 backtest.py --interval=1wk SPY QQQ   # weekly
 
 Execution model (conservative, no lookahead):
   - Signals are computed on bar close.
@@ -89,14 +91,29 @@ def stats(trades: list[Trade]) -> dict:
 
 
 def main() -> None:
-    symbols = sys.argv[1:] or DEFAULT_SYMBOLS
+    args = sys.argv[1:]
+    interval = "1d"
+    for a in list(args):
+        if a.startswith("--interval="):
+            interval = a.split("=", 1)[1]
+            args.remove(a)
+    symbols = args or DEFAULT_SYMBOLS
+
+    # yfinance limits intraday history; use the max allowed window.
+    dl_kwargs: dict = {"interval": interval}
+    if interval.endswith(("m", "h")):
+        dl_kwargs["period"] = "730d" if interval == "1h" else "60d"
+    else:
+        dl_kwargs["start"] = START
+
+    print(f"interval: {interval}")
     print(f"{'symbol':<8}{'trades':>8}{'winrate%':>10}{'avg_ret%':>10}"
           f"{'PF':>8}{'avg_bars':>10}{'worst%':>9}")
     print("-" * 63)
 
     all_trades: list[Trade] = []
     for sym in symbols:
-        df = yf.download(sym, start=START, auto_adjust=True, progress=False)
+        df = yf.download(sym, auto_adjust=True, progress=False, **dl_kwargs)
         if df is None or df.empty:
             print(f"{sym:<8}  no data")
             continue
