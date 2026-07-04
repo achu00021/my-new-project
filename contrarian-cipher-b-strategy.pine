@@ -31,6 +31,11 @@ strategy('Contrarian Cipher B v2 Strategy', shorttitle = 'CCB v2 Strat', overlay
 // INPUTS
 // ============================================================================
 
+// --- Performance table ---
+grpTbl = 'Performance Table'
+showStatsTable = input.bool(true, 'Show Performance Table', group = grpTbl)
+tblPosStr      = input.string('Top Right', 'Table Position', options = ['Top Right', 'Top Left', 'Bottom Right', 'Bottom Left'], group = grpTbl)
+
 // --- Trade settings ---
 grpTrade = 'Trade Settings'
 tradeDirection = input.string('Both', 'Trade Direction', options = ['Both', 'Long Only', 'Short Only'], group = grpTrade)
@@ -292,3 +297,81 @@ plot(longStopLine,  'Long Stop',    color = color.new(#ff5252, 30), style = plot
 plot(longTgtLine,   'Long Target',  color = color.new(#00e676, 30), style = plot.style_linebr)
 plot(shortStopLine, 'Short Stop',   color = color.new(#ff5252, 30), style = plot.style_linebr)
 plot(shortTgtLine,  'Short Target', color = color.new(#00e676, 30), style = plot.style_linebr)
+
+// ============================================================================
+// PERFORMANCE TABLE (live backtest stats, incl. winrate)
+// ============================================================================
+
+f_tablePos(simple string s) =>
+    switch s
+        'Top Right'    => position.top_right
+        'Top Left'     => position.top_left
+        'Bottom Right' => position.bottom_right
+        => position.bottom_left
+
+f_fmt(float v, string suffix) =>
+    na(v) ? '—' : str.tostring(v, '#.##') + suffix
+
+var table statsTable = table.new(f_tablePos(tblPosStr), 3, 8, bgcolor = color.new(#1e222d, 15), border_width = 1, border_color = color.new(#434651, 50))
+
+if showStatsTable and barstate.islast
+    hdrCol  = color.new(#787b86, 0)
+    txtCol  = color.white
+    winCol  = color.new(#00e676, 0)
+    lossCol = color.new(#ff5252, 0)
+
+    // Long / short breakdown from the closed trades list
+    int longN  = 0
+    int longW  = 0
+    int shortN = 0
+    int shortW = 0
+    if strategy.closedtrades > 0
+        for i = 0 to strategy.closedtrades - 1
+            isLong = strategy.closedtrades.size(i) > 0
+            isWin  = strategy.closedtrades.profit(i) > 0
+            if isLong
+                longN += 1
+                if isWin
+                    longW += 1
+            else
+                shortN += 1
+                if isWin
+                    shortW += 1
+
+    totalTrades = strategy.closedtrades
+    winrate     = totalTrades > 0 ? 100.0 * strategy.wintrades / totalTrades : na
+    profitFct   = strategy.grossloss > 0 ? strategy.grossprofit / strategy.grossloss : na
+    netPct      = strategy.initial_capital > 0 ? 100.0 * strategy.netprofit / strategy.initial_capital : na
+    maxDDPct    = strategy.initial_capital > 0 ? 100.0 * strategy.max_drawdown / strategy.initial_capital : na
+
+    table.cell(statsTable, 0, 0, 'CCB v2 Performance', text_color = hdrCol, text_size = size.small)
+    table.cell(statsTable, 1, 0, 'Value', text_color = hdrCol, text_size = size.small)
+    table.cell(statsTable, 2, 0, 'Winrate', text_color = hdrCol, text_size = size.small)
+
+    table.cell(statsTable, 0, 1, 'Total Trades', text_color = txtCol, text_size = size.small)
+    table.cell(statsTable, 1, 1, str.tostring(totalTrades), text_color = txtCol, text_size = size.small)
+    table.cell(statsTable, 2, 1, f_fmt(winrate, '%'), text_color = not na(winrate) and winrate >= 50 ? winCol : lossCol, text_size = size.small)
+
+    table.cell(statsTable, 0, 2, 'Longs', text_color = winCol, text_size = size.small)
+    table.cell(statsTable, 1, 2, str.tostring(longN), text_color = txtCol, text_size = size.small)
+    table.cell(statsTable, 2, 2, longN > 0 ? str.tostring(100.0 * longW / longN, '#.#') + '%' : '—', text_color = longN > 0 and longW * 2 >= longN ? winCol : lossCol, text_size = size.small)
+
+    table.cell(statsTable, 0, 3, 'Shorts', text_color = lossCol, text_size = size.small)
+    table.cell(statsTable, 1, 3, str.tostring(shortN), text_color = txtCol, text_size = size.small)
+    table.cell(statsTable, 2, 3, shortN > 0 ? str.tostring(100.0 * shortW / shortN, '#.#') + '%' : '—', text_color = shortN > 0 and shortW * 2 >= shortN ? winCol : lossCol, text_size = size.small)
+
+    table.cell(statsTable, 0, 4, 'Profit Factor', text_color = txtCol, text_size = size.small)
+    table.cell(statsTable, 1, 4, f_fmt(profitFct, ''), text_color = not na(profitFct) and profitFct >= 1 ? winCol : lossCol, text_size = size.small)
+    table.cell(statsTable, 2, 4, '', text_color = txtCol, text_size = size.small)
+
+    table.cell(statsTable, 0, 5, 'Net Profit', text_color = txtCol, text_size = size.small)
+    table.cell(statsTable, 1, 5, f_fmt(netPct, '%'), text_color = not na(netPct) and netPct >= 0 ? winCol : lossCol, text_size = size.small)
+    table.cell(statsTable, 2, 5, '', text_color = txtCol, text_size = size.small)
+
+    table.cell(statsTable, 0, 6, 'Max Drawdown', text_color = txtCol, text_size = size.small)
+    table.cell(statsTable, 1, 6, f_fmt(maxDDPct, '%'), text_color = lossCol, text_size = size.small)
+    table.cell(statsTable, 2, 6, '', text_color = txtCol, text_size = size.small)
+
+    table.cell(statsTable, 0, 7, 'Open Position', text_color = txtCol, text_size = size.small)
+    table.cell(statsTable, 1, 7, strategy.position_size > 0 ? 'LONG' : strategy.position_size < 0 ? 'SHORT' : 'FLAT', text_color = strategy.position_size > 0 ? winCol : strategy.position_size < 0 ? lossCol : txtCol, text_size = size.small)
+    table.cell(statsTable, 2, 7, '', text_color = txtCol, text_size = size.small)

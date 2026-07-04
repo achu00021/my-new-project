@@ -12,6 +12,7 @@ A demonstration project for GitHub repository creation workflow
 - **ADX trend filter** — signals are suppressed when a strong trend (high ADX with DI direction against the trade) is running them over.
 - **Price stretch component** — distance from a 200 EMA measured in ATRs feeds the extremity score, so signals need genuine overextension.
 - **Confirmation candle + signal cooldown** — avoids catching falling knives and clustered repeat losses.
+- **Winrate tables** — the indicator shows an on-chart table scoring every historical signal N bars after it fired (count, winrate, average return, split by buys/sells); the strategy shows a live performance table (total trades, winrate, long/short breakdown, profit factor, net profit, max drawdown, open position).
 
 ### What's inside
 

@@ -125,6 +125,13 @@ grpDsp = 'Display'
 showClassicCircles = input.bool(true, 'Show Classic Cipher B Buy/Sell Circles', group = grpDsp)
 showLabels         = input.bool(true, 'Show Contrarian Signal Labels', group = grpDsp)
 
+// --- Winrate table ---
+grpTbl = 'Winrate Table'
+showWinTable = input.bool(true, 'Show Signal Winrate Table', group = grpTbl)
+winHorizon   = input.int(20, 'Evaluation Horizon (bars)', minval = 1, group = grpTbl,
+     tooltip = 'A buy signal counts as a win if price closes higher this many bars later (lower for sells). This measures raw signal quality on the current chart; use the strategy script for winrate with stops/targets.')
+tblPosStr    = input.string('Top Right', 'Table Position', options = ['Top Right', 'Top Left', 'Bottom Right', 'Bottom Left'], group = grpTbl)
+
 // ============================================================================
 // HELPER FUNCTIONS
 // ============================================================================
@@ -387,3 +394,69 @@ alertcondition(wtBullDiv,      'WT Bullish Divergence',  'Contrarian Cipher B: b
 alertcondition(wtBearDiv,      'WT Bearish Divergence',  'Contrarian Cipher B: bearish divergence on WaveTrend.')
 alertcondition(fadeWarnLong,   'Fade Warning (long)',    'Contrarian Cipher B: late sellers at extreme oversold — contrarian long warning.')
 alertcondition(fadeWarnShort,  'Fade Warning (short)',   'Contrarian Cipher B: late buyers at extreme overbought — contrarian short warning.')
+
+// ============================================================================
+// SIGNAL WINRATE TABLE
+// Each signal is evaluated exactly once, `winHorizon` bars after it fired:
+// a buy wins if close is above the signal close, a sell wins if below.
+// This measures raw signal quality on the visible chart history.
+// ============================================================================
+
+f_tablePos(simple string s) =>
+    switch s
+        'Top Right'    => position.top_right
+        'Top Left'     => position.top_left
+        'Bottom Right' => position.bottom_right
+        => position.bottom_left
+
+var int   buyCount   = 0
+var int   buyWins    = 0
+var float buySumRet  = 0.0
+var int   sellCount  = 0
+var int   sellWins   = 0
+var float sellSumRet = 0.0
+
+// A signal that fired `winHorizon` bars ago is now mature: score it.
+if contrarianBuy[winHorizon]
+    retPct = (close - close[winHorizon]) / close[winHorizon] * 100
+    buyCount  := buyCount + 1
+    buyWins   := buyWins + (retPct > 0 ? 1 : 0)
+    buySumRet := buySumRet + retPct
+
+if contrarianSell[winHorizon]
+    retPct = (close[winHorizon] - close) / close[winHorizon] * 100
+    sellCount  := sellCount + 1
+    sellWins   := sellWins + (retPct > 0 ? 1 : 0)
+    sellSumRet := sellSumRet + retPct
+
+var table winTable = table.new(f_tablePos(tblPosStr), 4, 4, bgcolor = color.new(#1e222d, 15), border_width = 1, border_color = color.new(#434651, 50))
+
+f_pct(int wins, int total) =>
+    total > 0 ? str.tostring(100.0 * wins / total, '#.#') + '%' : '—'
+
+f_avg(float sumRet, int total) =>
+    total > 0 ? str.tostring(sumRet / total, '#.##') + '%' : '—'
+
+if showWinTable and barstate.islast
+    hdrCol  = color.new(#787b86, 0)
+    txtCol  = color.white
+    winCol  = color.new(#00e676, 0)
+    lossCol = color.new(#ff5252, 0)
+    totalCount = buyCount + sellCount
+    totalWins  = buyWins + sellWins
+    table.cell(winTable, 0, 0, 'Signal (' + str.tostring(winHorizon) + ' bars)', text_color = hdrCol, text_size = size.small)
+    table.cell(winTable, 1, 0, 'Count',   text_color = hdrCol, text_size = size.small)
+    table.cell(winTable, 2, 0, 'Winrate', text_color = hdrCol, text_size = size.small)
+    table.cell(winTable, 3, 0, 'Avg Ret', text_color = hdrCol, text_size = size.small)
+    table.cell(winTable, 0, 1, 'Buys',  text_color = winCol, text_size = size.small)
+    table.cell(winTable, 1, 1, str.tostring(buyCount), text_color = txtCol, text_size = size.small)
+    table.cell(winTable, 2, 1, f_pct(buyWins, buyCount), text_color = buyCount > 0 and buyWins * 2 >= buyCount ? winCol : lossCol, text_size = size.small)
+    table.cell(winTable, 3, 1, f_avg(buySumRet, buyCount), text_color = buySumRet >= 0 ? winCol : lossCol, text_size = size.small)
+    table.cell(winTable, 0, 2, 'Sells', text_color = lossCol, text_size = size.small)
+    table.cell(winTable, 1, 2, str.tostring(sellCount), text_color = txtCol, text_size = size.small)
+    table.cell(winTable, 2, 2, f_pct(sellWins, sellCount), text_color = sellCount > 0 and sellWins * 2 >= sellCount ? winCol : lossCol, text_size = size.small)
+    table.cell(winTable, 3, 2, f_avg(sellSumRet, sellCount), text_color = sellSumRet >= 0 ? winCol : lossCol, text_size = size.small)
+    table.cell(winTable, 0, 3, 'All',   text_color = txtCol, text_size = size.small)
+    table.cell(winTable, 1, 3, str.tostring(totalCount), text_color = txtCol, text_size = size.small)
+    table.cell(winTable, 2, 3, f_pct(totalWins, totalCount), text_color = totalCount > 0 and totalWins * 2 >= totalCount ? winCol : lossCol, text_size = size.small)
+    table.cell(winTable, 3, 3, f_avg(buySumRet + sellSumRet, totalCount), text_color = buySumRet + sellSumRet >= 0 ? winCol : lossCol, text_size = size.small)
