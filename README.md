@@ -75,6 +75,12 @@ crypto BTC/ETH, daily 2015-2026             81   86.4   1.14   1.40
 (87.1% → 86.2%); hourly drops to 81.3% and at 10 bps the hourly edge is
 roughly break-even.
 
+**4. Stop execution.** The backtest checks the −15% stop on the close; a
+real resting stop order triggers intrabar. `python/test_intrabar.py`
+compares both: winrate is unchanged (87.2% vs 87.1%) and the intrabar
+stop actually improves the worst trade (−18.3% vs −22.8%) because it
+fills at the stop level instead of waiting for the close.
+
 **Verdict:** expect roughly **84–87% on daily bars** in honest conditions —
 the genuine edge of buying statistically extreme dips inside long-term
 uptrends and taking small profits at the mean. The weekly 92%+ and the
