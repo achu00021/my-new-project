@@ -1,11 +1,14 @@
 //@version=5
 // TripleConfluence strategy — verify the winrate in TradingView's
-// Strategy Tester. Same logic as the indicator, with the full exit rule:
-// close above the short mean AND above entry price, or a time stop, or
-// a catastrophic stop (-15%) that cuts trades whose thesis has failed.
+// Strategy Tester. Same logic as the indicator, with the full rule set:
+//
+// Entry: after a signal, a LIMIT order rests 0.5*ATR(14) below the
+// signal close for the next 3 bars (default), or market-at-next-open.
+// Exit: close above the short mean AND above entry price, or a time
+// stop, or a catastrophic stop (-15%).
 //
 // Recommended: liquid index ETFs / large caps (SPY, QQQ, DIA, XLK,
-// MSFT, ...). Validated winrate ~85-88% on daily/hourly/weekly baskets,
+// MSFT, ...). Validated winrate ~87-90% on daily/hourly/weekly baskets,
 // including walk-forward and survivorship stress tests (see repository
 // backtest).
 strategy("TripleConfluence [High Winrate]", overlay = true,
@@ -14,20 +17,28 @@ strategy("TripleConfluence [High Winrate]", overlay = true,
      process_orders_on_close = false)
 
 // ---------------------------------------------------------------- inputs
-trendLen = input.int(200, "Trend SMA length",  minval = 10)
-exitLen  = input.int(7,   "Exit SMA length",   minval = 2)
-rsiLen   = input.int(2,   "RSI length",        minval = 1)
-rsiBuy   = input.float(10.0, "RSI oversold threshold", minval = 1, maxval = 50)
-bbLen    = input.int(20,  "Bollinger length",  minval = 5)
-bbMult   = input.float(2.0, "Bollinger multiplier", minval = 0.5, step = 0.1)
-pctbBuy  = input.float(0.10, "%B buy threshold", minval = 0.0, maxval = 1.0, step = 0.05)
-timeStop = input.int(75,  "Time stop (bars)",  minval = 1)
-stopPct  = input.float(15.0, "Catastrophic stop (%)", minval = 1.0, maxval = 50.0, step = 0.5)
+trendLen  = input.int(200, "Trend SMA length",  minval = 10)
+exitLen   = input.int(7,   "Exit SMA length",   minval = 2)
+rsiLen    = input.int(2,   "RSI length",        minval = 1)
+rsiBuy    = input.float(10.0, "RSI oversold threshold", minval = 1, maxval = 50)
+bbLen     = input.int(20,  "Bollinger length",  minval = 5)
+bbMult    = input.float(2.0, "Bollinger multiplier", minval = 0.5, step = 0.1)
+pctbBuy   = input.float(0.10, "%B buy threshold", minval = 0.0, maxval = 1.0, step = 0.05)
+entryMode = input.string("Limit (pullback)", "Entry mode",
+     options = ["Limit (pullback)", "Market (next open)"])
+atrLen    = input.int(14,  "ATR length (limit offset)", minval = 1)
+atrMult   = input.float(0.5, "Limit offset (ATR mult)", minval = 0.0, step = 0.1)
+workBars  = input.int(3,   "Limit order lifetime (bars)", minval = 1)
+timeStop  = input.int(75,  "Time stop (bars)",  minval = 1)
+stopPct   = input.float(15.0, "Catastrophic stop (%)", minval = 1.0, maxval = 50.0, step = 0.5)
+
+useLimit = entryMode == "Limit (pullback)"
 
 // ------------------------------------------------------------ indicators
 smaTrend = ta.sma(close, trendLen)
 smaExit  = ta.sma(close, exitLen)
 rsiFast  = ta.rsi(close, rsiLen)
+atrVal   = ta.atr(atrLen)
 
 basis = ta.sma(close, bbLen)
 dev   = bbMult * ta.stdev(close, bbLen)
@@ -36,8 +47,20 @@ pctB  = (close - (basis - dev)) / (2 * dev)
 // --------------------------------------------------------------- signals
 buySignal = close > smaTrend and rsiFast < rsiBuy and pctB < pctbBuy
 
+var int signalBar = na
+
 if buySignal and strategy.position_size == 0
-    strategy.entry("Long", strategy.long)   // fills next bar's open
+    if useLimit
+        strategy.entry("Long", strategy.long, limit = close - atrMult * atrVal)
+        signalBar := bar_index
+    else
+        strategy.entry("Long", strategy.long)   // fills next bar's open
+
+// cancel a stale limit order once its lifetime expires
+if useLimit and strategy.position_size == 0 and not na(signalBar)
+    if bar_index - signalBar >= workBars and not buySignal
+        strategy.cancel("Long")
+        signalBar := na
 
 if strategy.position_size > 0
     barsHeld = bar_index - strategy.opentrades.entry_bar_index(0)

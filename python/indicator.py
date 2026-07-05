@@ -13,6 +13,13 @@ A long-only mean-reversion signal built on three independent confirmations:
                     to the lower band, confirming the pullback is
                     statistically extreme rather than mild drift).
 
+Entry: rather than buying the next open, the default entry works a
+LIMIT order 0.5*ATR(14) below the signal close for the next 3 bars.
+Only ~60% of signals fill, but the fills are meaningfully better:
+higher average profit, higher profit factor, and a smaller worst loss
+on every timeframe tested. Set entry_mode="market" for the simpler
+next-open entry.
+
 Exit: close above BOTH the entry price and the short SMA (mean reached
 in profit), or a time stop, or a catastrophic stop (default -15%) that
 cuts trades whose thesis has clearly failed. Requiring the trade to be
@@ -39,6 +46,10 @@ class Params:
     pctb_buy: float = 0.10    # %B threshold (0 = at lower band)
     time_stop: int = 75       # max bars in trade
     stop_pct: float = 0.15    # catastrophic stop (fraction below entry)
+    entry_mode: str = "limit" # "limit" (pullback order) or "market" (next open)
+    entry_atr_len: int = 14   # ATR length for the limit offset
+    entry_atr_mult: float = 0.5   # limit = signal close - mult * ATR
+    entry_work_bars: int = 3  # bars the limit order stays working
 
 
 def sma(series: pd.Series, length: int) -> pd.Series:
@@ -67,6 +78,15 @@ def percent_b(series: pd.Series, length: int, mult: float) -> pd.Series:
     return (series - lower) / (upper - lower)
 
 
+def atr(df: pd.DataFrame, length: int) -> pd.Series:
+    """Wilder's ATR, matching TradingView's ta.atr."""
+    high, low, close = df["High"], df["Low"], df["Close"]
+    prev_close = close.shift(1)
+    tr = pd.concat([high - low, (high - prev_close).abs(),
+                    (low - prev_close).abs()], axis=1).max(axis=1)
+    return tr.ewm(alpha=1.0 / length, adjust=False).mean()
+
+
 def compute_signals(df: pd.DataFrame, p: Params = Params()) -> pd.DataFrame:
     """
     df must have columns: Open, High, Low, Close.
@@ -90,4 +110,7 @@ def compute_signals(df: pd.DataFrame, p: Params = Params()) -> pd.DataFrame:
 
     out["buy_signal"] = uptrend & oversold & stretched
     out["above_mean"] = close > out["sma_exit"]
+    out["atr"] = atr(out, p.entry_atr_len)
+    # price at which the pullback limit order would rest after a signal
+    out["limit_price"] = close - p.entry_atr_mult * out["atr"]
     return out

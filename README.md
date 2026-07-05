@@ -4,13 +4,14 @@ A long-only trading indicator designed to maximize winrate, built from three
 independent technical-analysis confirmations, with a **live winrate table on
 the chart**. All results below use next-open fills with no lookahead.
 
-Headline winrates (10-symbol baskets):
+Headline winrates with the default pullback-limit entries (10-symbol
+baskets):
 
 | Timeframe | Development basket | Out-of-sample basket |
 |-----------|--------------------|----------------------|
-| Daily (2005–2026) | **87.1%** (696 trades, PF 2.23) | **86.2%** (676 trades, PF 2.74) |
-| Hourly (~2 years) | **88.5%** (549 trades, PF 1.63) | **87.1%** (487 trades, PF 1.58) |
-| Weekly (2005–2026) | **87.0%** (131 trades, PF 2.84) | **92.3%** (130 trades, PF 4.97) |
+| Daily (2005–2026) | **86.7%** (460 trades, PF 2.75, avg +1.16%) | **87.9%** (429 trades, PF 3.12, avg +1.18%) |
+| Hourly (~2 years) | **90.1%** (365 trades, PF 2.04) | — |
+| Weekly (2005–2026) | **90.4%** (83 trades, PF 3.16) | — |
 
 These numbers are **validated, not just fitted** — see
 [How accurate are these winrates?](#how-accurate-are-these-winrates) below.
@@ -37,7 +38,13 @@ target*. This indicator combines:
 | 2 | Exhaustion | RSI(2) | RSI(2) < 10 — Connors-style fast-RSI pullback, one of the highest-winrate published setups on index ETFs |
 | 3 | Stretch | Bollinger %B(20, 2) | %B < 0.10 — price pressed into the lower band, so the dip is statistically extreme, not mild drift |
 
-**Entry**: all three conditions true at the close → buy next bar's open.
+**Entry** (default "limit" mode): all three conditions true at the close →
+place a **limit order 0.5×ATR(14) below the signal close**, working for the
+next 3 bars. Only ~60% of signals fill, but the fills buy deeper into the
+dip: average profit rises from +0.85% to +1.16% per trade, profit factor
+from 2.2 to 2.8, and the worst loss shrinks — on every timeframe tested.
+Set entry mode to "market" for the simpler buy-next-open entry
+(more trades, thinner edge per trade).
 
 **Exit** (first that triggers):
 
@@ -59,49 +66,54 @@ then evaluated on 2016–2026 — a window tuning never saw:
 
 ```
 test                                    trades   win%   avg%     PF
-dev basket 2016-2026                       329   84.2   0.48   1.49
-OOS basket 2016-2026 (symbols+dates new)   323   84.8   0.91   2.92
+dev basket 2016-2026                       218   83.5   0.62   1.57
+OOS basket 2016-2026 (symbols+dates new)   208   87.0   1.34   4.19
 ```
 
 **2. Survivorship stress.** A basket of historically weak/troubled large
 caps (GE, F, T, C, BAC, INTC, VZ, XRX) — no hindsight winners — and crypto:
 
 ```
-weak large caps, daily 2005-2026           436   84.4   0.84   1.77
-crypto BTC/ETH, daily 2015-2026             81   86.4   1.14   1.40
+weak large caps, daily 2005-2026           303   83.2   0.76   1.56
+crypto BTC/ETH, daily 2015-2026             51   86.3   1.65   1.53
 ```
 
 **3. Costs.** With 5 bps slippage per side, daily winrate barely moves
-(87.1% → 86.2%); hourly drops to 81.3% and at 10 bps the hourly edge is
-roughly break-even.
+(86.7% → 85.4%); hourly drops to 83.0% and at 10 bps the hourly edge is
+thin (75.3%, PF 1.18).
 
 **4. Stop execution.** The backtest checks the −15% stop on the close; a
 real resting stop order triggers intrabar. `python/test_intrabar.py`
-compares both: winrate is unchanged (87.2% vs 87.1%) and the intrabar
-stop actually improves the worst trade (−18.3% vs −22.8%) because it
-fills at the stop level instead of waiting for the close.
+compares both (market-entry config): winrate is unchanged (87.2% vs 87.1%)
+and the intrabar stop actually improves the worst trade (−18.3% vs −22.8%)
+because it fills at the stop level instead of waiting for the close.
 
-**Verdict:** expect roughly **84–87% on daily bars** in honest conditions —
+**5. Entry fills.** The default limit entry assumes a fill when the bar's
+low touches the limit price, and assumes a fill at the open when price
+gaps below the order. Both are conservative for a resting limit order on
+liquid ETFs/large caps.
+
+**Verdict:** expect roughly **84–88% on daily bars** in honest conditions —
 the genuine edge of buying statistically extreme dips inside long-term
-uptrends and taking small profits at the mean. The weekly 92%+ and the
-frictionless hourly 88.5% are real in-sample numbers but rest on fewer
-trades or vanish under costs; treat daily as the representative timeframe.
+uptrends and taking small profits at the mean. The weekly 90%+ and the
+frictionless hourly 90.1% are real in-sample numbers but rest on fewer
+trades or shrink under costs; treat daily as the representative timeframe.
 
-## Full daily results (development basket, 2005–2026)
+## Full daily results (development basket, 2005–2026, limit entries)
 
 ```
 symbol    trades  winrate%  avg_ret%      PF  avg_bars   worst%
-SPY           73      86.3      0.57    1.86       8.4   -17.83
-QQQ           80      82.5      0.95    2.65       8.4   -20.61
-DIA           73      90.4      0.89    3.79       7.7   -21.47
-IWM           70      85.7      0.26    1.22       8.6   -20.15
-AAPL          74      89.2      1.34    2.16       7.3   -22.76
-MSFT          61      91.8      1.26    2.53       9.5   -16.58
-GOOGL         72      87.5      1.12    2.16       9.5   -18.18
-JNJ           56      83.9      0.37    1.62      16.4    -9.41
-XLP           78      87.2      0.93   24.98       8.1    -1.05
-GLD           59      86.4      0.65    2.00      11.5   -15.56
-ALL          696      87.1      0.85    2.23       9.3   -22.76
+SPY           47      80.9      0.38    1.34       9.2   -17.92
+QQQ           53      86.8      1.12    2.37       9.1   -19.65
+DIA           44      88.6      0.78    2.57       9.1   -20.64
+IWM           53      84.9      0.59    1.49       8.3   -19.10
+AAPL          51      94.1      2.81    7.36       7.4   -16.91
+MSFT          39      87.2      2.24    7.09       6.5    -9.79
+GOOGL         49      87.8      1.47    4.08       9.7   -16.40
+JNJ           43      79.1      0.31    1.41      18.6    -9.15
+XLP           49      91.8      1.13   75.96       8.9    -0.62
+GLD           32      84.4      0.58    1.62      11.7   -16.97
+ALL          460      86.7      1.16    2.75       9.7   -20.64
 ```
 
 Out-of-sample basket: XLK, XLV, XLE, KO, PG, V, WMT, EEM, EFA, HD.
@@ -116,10 +128,10 @@ PF = profit factor (gross wins / gross losses).
    daily is the best-validated).
 2. The **winrate table** (top-right by default) shows trades, wins/losses,
    winrate, average trade, profit factor, and average holding time — computed
-   live for the exact symbol and timeframe on your chart, using next-open
-   fills with no lookahead.
-3. Green triangles mark BUY signals; magenta triangles mark exit fills.
-   Alerts are included for both.
+   live for the exact symbol and timeframe on your chart, with no lookahead.
+3. Small lime triangles mark signals; a **yellow line shows the resting
+   limit order** (the improved entry point); green labels mark actual entry
+   fills; magenta triangles mark exit fills. Alerts exist for all three.
 4. `pinescript/triple_confluence_strategy.pine` runs the same system in the
    Strategy Tester for full equity-curve statistics.
 

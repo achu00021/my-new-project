@@ -45,9 +45,11 @@ def run_backtest(df: pd.DataFrame, p: Params = Params(),
                  cost_bps: float = 0.0) -> list[Trade]:
     df = compute_signals(df, p)
     opens = df["Open"].to_numpy()
+    lows = df["Low"].to_numpy()
     closes = df["Close"].to_numpy()
     buy = df["buy_signal"].to_numpy()
     above_mean = df["above_mean"].to_numpy()
+    limit_px = df["limit_price"].to_numpy()
     dates = df.index
     cost = cost_bps / 10000.0
 
@@ -55,14 +57,27 @@ def run_backtest(df: pd.DataFrame, p: Params = Params(),
     in_pos = False
     entry_i = -1
     entry_px = np.nan
+    order_px = np.nan        # resting limit order price
+    order_until = -1         # last bar index the order keeps working
 
     n = len(df)
     for i in range(n - 1):
         if not in_pos:
-            if buy[i]:
+            # try to fill a working limit order at this bar
+            if i <= order_until and lows[i] <= order_px:
                 in_pos = True
-                entry_i = i + 1                # fill next open
-                entry_px = opens[i + 1] * (1 + cost)
+                entry_i = i
+                # gap through the limit fills at the open
+                entry_px = min(order_px, opens[i]) * (1 + cost)
+                order_until = -1
+            if not in_pos and buy[i]:
+                if p.entry_mode == "market":
+                    in_pos = True
+                    entry_i = i + 1            # fill next open
+                    entry_px = opens[i + 1] * (1 + cost)
+                else:
+                    order_px = limit_px[i]
+                    order_until = i + p.entry_work_bars
         else:
             bars_held = i - entry_i
             # Exit when the pullback has reverted (close above the short
