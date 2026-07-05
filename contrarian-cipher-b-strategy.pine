@@ -44,6 +44,13 @@ riskPct   = input.float(3.0, 'Risk Per Trade (% of equity)', minval = 0.1, maxva
 leverageX = input.float(10, 'Leverage (for margin / liquidation info)', minval = 1, maxval = 125, group = grpSiz,
      tooltip = 'Used only to display margin required and to warn when the stop distance gets close to the approximate liquidation distance (100% / leverage). It does not change position size or risk.')
 
+// --- Backtest window ---
+grpDate = 'Backtest Window'
+useDateFilter = input.bool(false, 'Limit Backtest To Date Range', group = grpDate,
+     tooltip = 'Enable to measure performance over an exact period (e.g. the last 60 days). Only trades inside the window are taken.')
+btStart = input.time(timestamp('05 May 2026 00:00 +0000'), 'Start', group = grpDate)
+btEnd   = input.time(timestamp('04 Jul 2026 23:59 +0000'), 'End',   group = grpDate)
+
 // --- Trade settings ---
 grpTrade = 'Trade Settings'
 tradeDirection = input.string('Both', 'Trade Direction', options = ['Both', 'Long Only', 'Short Only'], group = grpTrade)
@@ -259,6 +266,7 @@ if contrarianSell
 
 allowLong  = tradeDirection != 'Short Only'
 allowShort = tradeDirection != 'Long Only'
+inDateRange = not useDateFilter or (time >= btStart and time <= btEnd)
 
 var float entryAtr = na
 
@@ -270,12 +278,12 @@ riskQty     = strategy.equity * riskPct / 100 / stopDistNow
 marginNow   = riskQty * close / leverageX
 sizeTxt     = ' | qty ' + str.tostring(riskQty, '#.####') + ' | margin $' + str.tostring(marginNow, '#.##') + ' @' + str.tostring(leverageX, '#') + 'x'
 
-if contrarianBuy and allowLong and strategy.position_size <= 0
+if contrarianBuy and allowLong and inDateRange and strategy.position_size <= 0
     entryAtr := atrVal
     strategy.entry('Long', strategy.long, qty = useRiskSizing ? riskQty : na,
          alert_message = alertTicker + 'ENTER LONG @ ' + str.tostring(close) + ' | SL ' + str.tostring(close - atrStopMult * atrVal, format.mintick) + ' | TP ' + str.tostring(close + atrTargetMult * atrVal, format.mintick) + sizeTxt)
 
-if contrarianSell and allowShort and strategy.position_size >= 0
+if contrarianSell and allowShort and inDateRange and strategy.position_size >= 0
     entryAtr := atrVal
     strategy.entry('Short', strategy.short, qty = useRiskSizing ? riskQty : na,
          alert_message = alertTicker + 'ENTER SHORT @ ' + str.tostring(close) + ' | SL ' + str.tostring(close + atrStopMult * atrVal, format.mintick) + ' | TP ' + str.tostring(close - atrTargetMult * atrVal, format.mintick) + sizeTxt)
