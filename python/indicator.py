@@ -14,11 +14,12 @@ A long-only mean-reversion signal built on three independent confirmations:
                     statistically extreme rather than mild drift).
 
 Exit: close above BOTH the entry price and the short SMA (mean reached
-in profit), or a time stop. Requiring the trade to be profitable at the
-mean-reversion exit is what pushes the winrate above 85%: most pullbacks
-inside a long-term uptrend resolve upward within a handful of bars, and
-the generous time stop gives the rest room to recover, which lifts the
-winrate on every timeframe tested (daily, hourly, weekly).
+in profit), or a time stop, or a catastrophic stop (default -15%) that
+cuts trades whose thesis has clearly failed. Requiring the trade to be
+profitable at the mean-reversion exit is what pushes the winrate above
+85%: most pullbacks inside a long-term uptrend resolve upward within a
+handful of bars, the generous time stop gives the rest room to recover,
+and the catastrophic stop caps the tail risk of the few that never do.
 """
 
 from dataclasses import dataclass
@@ -37,6 +38,7 @@ class Params:
     bb_mult: float = 2.0      # Bollinger std-dev multiplier
     pctb_buy: float = 0.10    # %B threshold (0 = at lower band)
     time_stop: int = 75       # max bars in trade
+    stop_pct: float = 0.15    # catastrophic stop (fraction below entry)
 
 
 def sma(series: pd.Series, length: int) -> pd.Series:

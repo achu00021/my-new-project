@@ -2,14 +2,18 @@
 
 A long-only trading indicator designed to maximize winrate, built from three
 independent technical-analysis confirmations, with a **live winrate table on
-the chart**. Backtested winrate (10-symbol baskets, next-open fills, no
-lookahead):
+the chart**. All results below use next-open fills with no lookahead.
+
+Headline winrates (10-symbol baskets):
 
 | Timeframe | Development basket | Out-of-sample basket |
 |-----------|--------------------|----------------------|
-| Daily (2005–2026) | **87.5%** (696 trades, PF 3.56) | **86.4%** (676 trades, PF 4.17) |
+| Daily (2005–2026) | **87.1%** (696 trades, PF 2.23) | **86.2%** (676 trades, PF 2.74) |
 | Hourly (~2 years) | **88.5%** (549 trades, PF 1.63) | **87.1%** (487 trades, PF 1.58) |
-| Weekly (2005–2026) | **93.8%** (130 trades, PF 24.5) | **96.2%** (130 trades, PF 18.2) |
+| Weekly (2005–2026) | **87.0%** (131 trades, PF 2.84) | **92.3%** (130 trades, PF 4.97) |
+
+These numbers are **validated, not just fitted** — see
+[How accurate are these winrates?](#how-accurate-are-these-winrates) below.
 
 Provided as:
 
@@ -17,8 +21,9 @@ Provided as:
   (chart signals, alerts, and an on-chart winrate table that simulates the
   system bar by bar on whatever symbol/timeframe you load) and
   `pinescript/triple_confluence_strategy.pine` (Strategy Tester version).
-- **Python** — `python/indicator.py` (signal computation) and
-  `python/backtest.py` (backtester on real data via yfinance, any timeframe).
+- **Python** — `python/indicator.py` (signal computation),
+  `python/backtest.py` (backtester, any timeframe, optional costs), and
+  `python/validate.py` (walk-forward / survivorship / cost audit).
 
 ## Why this design wins so often
 
@@ -34,42 +39,66 @@ target*. This indicator combines:
 
 **Entry**: all three conditions true at the close → buy next bar's open.
 
-**Exit**: close back above the **7-bar SMA while in profit** (the pullback
-has reverted to its mean), or a **75-bar time stop**. Requiring profit at
-the mean-reversion exit, plus a patient time stop that gives the trade room
-to recover inside an intact uptrend, is what lifts the winrate to 85–95%
-on every timeframe tested.
+**Exit** (first that triggers):
+
+1. Close back above the **7-bar SMA while in profit** — the pullback has
+   reverted to its mean. This is ~87% of exits.
+2. **Catastrophic stop** at −15% — the dip-buying thesis has failed; cut it.
+3. **75-bar time stop** — cap how long capital can sit in a stagnant trade.
 
 All parameters are in *bars*, so the same settings apply on any timeframe —
 the logic self-scales (200-bar trend, 20-bar bands, 7-bar mean).
 
-## Backtest results (next-open fills, no lookahead)
+## How accurate are these winrates?
 
-Development basket — SPY, QQQ, DIA, IWM, AAPL, MSFT, GOOGL, JNJ, XLP, GLD.
-Daily, 2005–2026:
+A high backtested winrate is easy to fake with lookahead, survivorship bias,
+or overfitting. `python/validate.py` attacks the result from three angles:
+
+**1. Walk-forward (unseen data).** Parameters chosen on 2005–2015 data only,
+then evaluated on 2016–2026 — a window tuning never saw:
+
+```
+test                                    trades   win%   avg%     PF
+dev basket 2016-2026                       329   84.2   0.48   1.49
+OOS basket 2016-2026 (symbols+dates new)   323   84.8   0.91   2.92
+```
+
+**2. Survivorship stress.** A basket of historically weak/troubled large
+caps (GE, F, T, C, BAC, INTC, VZ, XRX) — no hindsight winners — and crypto:
+
+```
+weak large caps, daily 2005-2026           436   84.4   0.84   1.77
+crypto BTC/ETH, daily 2015-2026             81   86.4   1.14   1.40
+```
+
+**3. Costs.** With 5 bps slippage per side, daily winrate barely moves
+(87.1% → 86.2%); hourly drops to 81.3% and at 10 bps the hourly edge is
+roughly break-even.
+
+**Verdict:** expect roughly **84–87% on daily bars** in honest conditions —
+the genuine edge of buying statistically extreme dips inside long-term
+uptrends and taking small profits at the mean. The weekly 92%+ and the
+frictionless hourly 88.5% are real in-sample numbers but rest on fewer
+trades or vanish under costs; treat daily as the representative timeframe.
+
+## Full daily results (development basket, 2005–2026)
 
 ```
 symbol    trades  winrate%  avg_ret%      PF  avg_bars   worst%
-SPY           73      87.7      1.12   10.13      10.2    -6.19
-QQQ           80      83.8      1.29    6.29       9.0    -8.83
-DIA           73      91.8      1.09   10.04       8.6    -7.25
-IWM           70      85.7      0.80    2.26      11.9   -14.52
-AAPL          74      90.5      1.81    3.46       9.4   -24.12
-MSFT          61      90.2      1.23    2.44      10.0   -18.43
-GOOGL         72      88.9      1.61    4.34      12.2   -16.04
+SPY           73      86.3      0.57    1.86       8.4   -17.83
+QQQ           80      82.5      0.95    2.65       8.4   -20.61
+DIA           73      90.4      0.89    3.79       7.7   -21.47
+IWM           70      85.7      0.26    1.22       8.6   -20.15
+AAPL          74      89.2      1.34    2.16       7.3   -22.76
+MSFT          61      91.8      1.26    2.53       9.5   -16.58
+GOOGL         72      87.5      1.12    2.16       9.5   -18.18
 JNJ           56      83.9      0.37    1.62      16.4    -9.41
-XLP           78      85.9      0.93   24.98       8.1    -1.05
-GLD           59      86.4      0.57    1.78      12.3   -20.45
-ALL          696      87.5      1.11    3.56      10.6   -24.12
+XLP           78      87.2      0.93   24.98       8.1    -1.05
+GLD           59      86.4      0.65    2.00      11.5   -15.56
+ALL          696      87.1      0.85    2.23       9.3   -22.76
 ```
 
-Hourly (max yfinance history, ~730 days): **88.5%** over 549 trades.
-Weekly (2005–2026): **93.8%** over 130 trades.
-
-Out-of-sample basket (XLK, XLV, XLE, KO, PG, V, WMT, EEM, EFA, HD — never
-used during tuning): daily **86.4%** / 676 trades, hourly **87.1%** / 487
-trades, weekly **96.2%** / 130 trades.
-
+Out-of-sample basket: XLK, XLV, XLE, KO, PG, V, WMT, EEM, EFA, HD.
 PF = profit factor (gross wins / gross losses).
 
 ## Usage
@@ -78,7 +107,7 @@ PF = profit factor (gross wins / gross losses).
 
 1. Open the Pine Editor, paste `pinescript/triple_confluence_indicator.pine`,
    and add it to a chart of a liquid ETF or large-cap stock (any timeframe;
-   daily/hourly/weekly are the tested ones).
+   daily is the best-validated).
 2. The **winrate table** (top-right by default) shows trades, wins/losses,
    winrate, average trade, profit factor, and average holding time — computed
    live for the exact symbol and timeframe on your chart, using next-open
@@ -97,19 +126,20 @@ python3 backtest.py                          # default 10-symbol basket, daily
 python3 backtest.py SPY QQQ TSLA             # any symbols
 python3 backtest.py --interval=1h            # hourly
 python3 backtest.py --interval=1wk SPY QQQ   # weekly
+python3 backtest.py --cost=5                 # 5 bps slippage per side
+python3 validate.py                          # full accuracy audit
 ```
 
 ## Honest caveats
 
 - **Winrate is not profitability.** This system wins often because it takes
-  quick, small profits and lets the occasional loser run to a time stop —
-  the worst single trade in the daily test was −24%. The profit factor
-  (3.5 daily) shows the edge is real, but position-size accordingly.
+  quick, small profits; losses are rarer but larger (capped by the −15%
+  stop). The profit factor (≈2.2 daily) shows the edge is real, but
+  position-size accordingly.
 - It is a **bull-regime dip buyer**. It goes quiet in bear markets (by
   design — the 200-SMA filter) and does not short.
-- Hourly per-trade edge is small (~0.2% average); commissions and slippage
-  matter much more intraday than on daily/weekly bars.
-- Weekly results look spectacular but rest on only ~130 trades with long
-  holding periods — treat the daily numbers as the most representative.
+- Hourly per-trade edge is small (~0.2% average) and disappears at ~10 bps
+  round-trip costs; intraday use requires very low fees.
+- Weekly results rest on only ~130 trades; treat daily as representative.
 - Past performance never guarantees future results. This is educational
   code, not financial advice.

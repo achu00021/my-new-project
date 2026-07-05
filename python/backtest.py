@@ -7,6 +7,7 @@ Usage:
     python3 backtest.py SPY QQQ AAPL             # custom symbols, daily
     python3 backtest.py --interval=1h            # hourly (max ~730 days)
     python3 backtest.py --interval=1wk SPY QQQ   # weekly
+    python3 backtest.py --cost=5                 # 5 bps slippage per side
 
 Execution model (conservative, no lookahead):
   - Signals are computed on bar close.
@@ -40,13 +41,15 @@ class Trade:
         return self.exit / self.entry - 1.0
 
 
-def run_backtest(df: pd.DataFrame, p: Params = Params()) -> list[Trade]:
+def run_backtest(df: pd.DataFrame, p: Params = Params(),
+                 cost_bps: float = 0.0) -> list[Trade]:
     df = compute_signals(df, p)
     opens = df["Open"].to_numpy()
     closes = df["Close"].to_numpy()
     buy = df["buy_signal"].to_numpy()
     above_mean = df["above_mean"].to_numpy()
     dates = df.index
+    cost = cost_bps / 10000.0
 
     trades: list[Trade] = []
     in_pos = False
@@ -59,15 +62,18 @@ def run_backtest(df: pd.DataFrame, p: Params = Params()) -> list[Trade]:
             if buy[i]:
                 in_pos = True
                 entry_i = i + 1                # fill next open
-                entry_px = opens[i + 1]
+                entry_px = opens[i + 1] * (1 + cost)
         else:
             bars_held = i - entry_i
             # Exit when the pullback has reverted (close above the short
-            # mean) AND the trade is in profit, or on the time stop.
+            # mean) AND the trade is in profit; bail on the time stop or
+            # the catastrophic stop (the trade thesis has failed).
             take = above_mean[i] and closes[i] > entry_px
-            if i >= entry_i and (take or bars_held >= p.time_stop):
+            stop = bars_held >= p.time_stop or closes[i] < entry_px * (1 - p.stop_pct)
+            if i >= entry_i and (take or stop):
                 trades.append(
-                    Trade(dates[entry_i], dates[i + 1], entry_px, opens[i + 1], bars_held + 1)
+                    Trade(dates[entry_i], dates[i + 1], entry_px,
+                          opens[i + 1] * (1 - cost), bars_held + 1)
                 )
                 in_pos = False
     return trades
@@ -93,9 +99,13 @@ def stats(trades: list[Trade]) -> dict:
 def main() -> None:
     args = sys.argv[1:]
     interval = "1d"
+    cost_bps = 0.0
     for a in list(args):
         if a.startswith("--interval="):
             interval = a.split("=", 1)[1]
+            args.remove(a)
+        elif a.startswith("--cost="):
+            cost_bps = float(a.split("=", 1)[1])
             args.remove(a)
     symbols = args or DEFAULT_SYMBOLS
 
@@ -106,7 +116,7 @@ def main() -> None:
     else:
         dl_kwargs["start"] = START
 
-    print(f"interval: {interval}")
+    print(f"interval: {interval}, cost: {cost_bps} bps/side")
     print(f"{'symbol':<8}{'trades':>8}{'winrate%':>10}{'avg_ret%':>10}"
           f"{'PF':>8}{'avg_bars':>10}{'worst%':>9}")
     print("-" * 63)
@@ -119,7 +129,7 @@ def main() -> None:
             continue
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
-        trades = run_backtest(df)
+        trades = run_backtest(df, cost_bps=cost_bps)
         all_trades.extend(trades)
         s = stats(trades)
         if s["trades"] == 0:

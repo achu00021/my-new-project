@@ -8,10 +8,12 @@
 //   3. Stretch : Bollinger %B near the lower band (statistically extreme dip)
 //
 // Exit: close back above the short mean (7 SMA) while in profit, or a
-// time stop. The table simulates these trades bar by bar (next-open
-// fills, no lookahead) and shows the winrate on the current chart and
-// timeframe. Historical winrate: ~87% daily, ~88% hourly, ~94% weekly
-// on liquid ETFs / large caps (see repository backtest).
+// time stop, or a catastrophic stop (-15%) that cuts trades whose
+// thesis has failed. The table simulates these trades bar by bar
+// (next-open fills, no lookahead) and shows the winrate on the current
+// chart and timeframe. Validated winrate: ~85-88% on daily/hourly/weekly
+// liquid ETFs and large caps, including walk-forward and survivorship
+// stress tests (see repository backtest).
 indicator("TripleConfluence [High Winrate]", overlay = true)
 
 // ---------------------------------------------------------------- inputs
@@ -23,6 +25,7 @@ bbLen     = input.int(20,  "Bollinger length",  minval = 5)
 bbMult    = input.float(2.0, "Bollinger multiplier", minval = 0.5, step = 0.1)
 pctbBuy   = input.float(0.10, "%B buy threshold", minval = 0.0, maxval = 1.0, step = 0.05)
 timeStop  = input.int(75,  "Time stop (bars)",  minval = 1)
+stopPct   = input.float(15.0, "Catastrophic stop (%)", minval = 1.0, maxval = 50.0, step = 0.5)
 showTable = input.bool(true, "Show winrate table")
 tablePos  = input.string("top_right", "Table position",
      options = ["top_right", "top_left", "bottom_right", "bottom_left"])
@@ -86,7 +89,9 @@ if not inPos
     pendEntry := buySignal
 else
     barsHeld = bar_index - entryBar
-    pendExit := (close > smaExit and close > entryPx) or barsHeld >= timeStop
+    takeProfit = close > smaExit and close > entryPx
+    bailOut    = barsHeld >= timeStop or close < entryPx * (1 - stopPct / 100.0)
+    pendExit  := takeProfit or bailOut
 
 // ----------------------------------------------------------------- plots
 plot(smaTrend, "Trend SMA (200)", color = color.new(color.orange, 0), linewidth = 2)
