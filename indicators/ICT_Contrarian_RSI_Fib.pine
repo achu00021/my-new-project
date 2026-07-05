@@ -1,0 +1,342 @@
+//@version=5
+indicator("ICT Contrarian RSI Fib [High Winrate]", shorttitle="ICT-CRF", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INPUTS — Account & Risk
+// ═══════════════════════════════════════════════════════════════════════════════
+grpRisk     = "Account & Risk Management"
+accountSize = input.float(1000.0, "Account Size ($)", minval=1, group=grpRisk)
+riskPct     = input.float(3.0, "Risk Per Trade (%)", minval=0.1, maxval=100, step=0.1, group=grpRisk)
+leverage    = input.float(15.0, "Leverage (x)", minval=1, maxval=125, step=1, group=grpRisk)
+rrRatio     = input.float(2.0, "Reward:Risk Ratio", minval=0.5, maxval=10, step=0.1, group=grpRisk)
+atrMultSL   = input.float(1.2, "ATR Stop Multiplier", minval=0.3, maxval=5, step=0.1, group=grpRisk)
+
+grpICT      = "ICT Settings"
+swingLen    = input.int(5, "Swing Length", minval=2, maxval=50, group=grpICT)
+showOB      = input.bool(true, "Show Order Blocks", group=grpICT)
+showFVG     = input.bool(true, "Show Fair Value Gaps", group=grpICT)
+showFib     = input.bool(true, "Show Fibonacci Levels", group=grpICT)
+showPD      = input.bool(true, "Show Premium / Discount", group=grpICT)
+
+grpRSI      = "RSI & Contrarian"
+rsiLen      = input.int(14, "RSI Length", minval=2, group=grpRSI)
+rsiOB       = input.int(70, "RSI Overbought", minval=50, maxval=95, group=grpRSI)
+rsiOS       = input.int(30, "RSI Oversold", minval=5, maxval=50, group=grpRSI)
+useDiv      = input.bool(true, "Require RSI Divergence", group=grpRSI)
+contrarian  = input.bool(true, "Contrarian Mode (fade sweeps)", group=grpRSI)
+
+grpFilter   = "High Winrate Filters"
+minConfluence = input.int(4, "Min Confluence Score (1-6)", minval=1, maxval=6, group=grpFilter)
+requireFib  = input.bool(true, "Require Fib Golden Pocket", group=grpFilter)
+requireSweep = input.bool(true, "Require Liquidity Sweep", group=grpFilter)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CORE CALCULATIONS
+// ═══════════════════════════════════════════════════════════════════════════════
+riskAmount      = accountSize * riskPct / 100.0
+maxNotional     = accountSize * leverage
+atr             = ta.atr(14)
+
+// ─── Swing Highs / Lows (ICT structure) ───────────────────────────────────────
+swingHigh = ta.pivothigh(high, swingLen, swingLen)
+swingLow  = ta.pivotlow(low, swingLen, swingLen)
+
+var float lastSwingHigh = na
+var float lastSwingLow  = na
+var int   lastSwingHighBar = na
+var int   lastSwingLowBar  = na
+
+if not na(swingHigh)
+    lastSwingHigh := swingHigh
+    lastSwingHighBar := bar_index - swingLen
+if not na(swingLow)
+    lastSwingLow := swingLow
+    lastSwingLowBar := bar_index - swingLen
+
+// Market structure: bullish if higher lows, bearish if lower highs
+var int   structure    = 0  // 1 = bullish, -1 = bearish
+var float prevPivotLow  = na
+var float prevPivotHigh = na
+if not na(swingLow)
+    if not na(prevPivotLow) and swingLow > prevPivotLow
+        structure := 1
+    prevPivotLow := swingLow
+if not na(swingHigh)
+    if not na(prevPivotHigh) and swingHigh < prevPivotHigh
+        structure := -1
+    prevPivotHigh := swingHigh
+
+// ─── Fibonacci Retracement (auto from last swing leg) ───────────────────────────
+var line[] fibLines = array.new_line()
+var label[] fibLabels = array.new_label()
+
+float fib0   = na
+float fib236 = na
+float fib382 = na
+float fib500 = na
+float fib618 = na
+float fib786 = na
+float fib100 = na
+
+bool bullishLeg = not na(lastSwingLow) and not na(lastSwingHigh) and lastSwingLowBar > lastSwingHighBar
+bool bearishLeg = not na(lastSwingHigh) and not na(lastSwingLow) and lastSwingHighBar > lastSwingLowBar
+
+if bullishLeg
+    float legHigh = lastSwingHigh
+    float legLow  = lastSwingLow
+    float range   = legHigh - legLow
+    fib0   := legLow
+    fib236 := legLow + range * 0.236
+    fib382 := legLow + range * 0.382
+    fib500 := legLow + range * 0.500
+    fib618 := legLow + range * 0.618
+    fib786 := legLow + range * 0.786
+    fib100 := legHigh
+else if bearishLeg
+    float legHigh = lastSwingHigh
+    float legLow  = lastSwingLow
+    float range   = legHigh - legLow
+    fib0   := legHigh
+    fib236 := legHigh - range * 0.236
+    fib382 := legHigh - range * 0.382
+    fib500 := legHigh - range * 0.500
+    fib618 := legHigh - range * 0.618
+    fib786 := legHigh - range * 0.786
+    fib100 := legLow
+
+inGoldenPocketLong  = not na(fib618) and not na(fib786) and low <= fib786 and low >= fib618
+inGoldenPocketShort = not na(fib618) and not na(fib786) and high >= fib618 and high <= fib786
+
+// Premium / Discount (ICT equilibrium = 50% fib)
+float equilibrium = not na(fib500) ? fib500 : na
+inDiscount = not na(equilibrium) and close < equilibrium
+inPremium  = not na(equilibrium) and close > equilibrium
+
+// ─── RSI & Divergence ───────────────────────────────────────────────────────────
+rsi = ta.rsi(close, rsiLen)
+
+// Pivot RSI for divergence
+rsiPivotHigh = ta.pivothigh(rsi, swingLen, swingLen)
+rsiPivotLow  = ta.pivotlow(rsi, swingLen, swingLen)
+
+var float prevPriceHigh = na
+var float prevRsiHigh   = na
+var float prevPriceLow  = na
+var float prevRsiLow    = na
+
+bool bearishDiv = false
+bool bullishDiv = false
+
+if not na(rsiPivotHigh)
+    if not na(prevPriceHigh) and high[swingLen] > prevPriceHigh and rsiPivotHigh < prevRsiHigh
+        bearishDiv := true
+    prevPriceHigh := high[swingLen]
+    prevRsiHigh   := rsiPivotHigh
+
+if not na(rsiPivotLow)
+    if not na(prevPriceLow) and low[swingLen] < prevPriceLow and rsiPivotLow > prevRsiLow
+        bullishDiv := true
+    prevPriceLow := low[swingLen]
+    prevRsiLow   := rsiPivotLow
+
+rsiOversold   = rsi < rsiOS
+rsiOverbought = rsi > rsiOB
+
+// ─── Liquidity Sweep (ICT) ──────────────────────────────────────────────────────
+bullSweep = not na(lastSwingLow) and low < lastSwingLow and close > lastSwingLow
+bearSweep = not na(lastSwingHigh) and high > lastSwingHigh and close < lastSwingHigh
+
+// ─── Fair Value Gaps ──────────────────────────────────────────────────────────
+bullFVG = low > high[2]
+bearFVG = high < low[2]
+bullFVGTop    = low
+bullFVGBottom = high[2]
+bearFVGTop    = low[2]
+bearFVGBottom = high
+
+var box[] fvgBoxes = array.new_box()
+
+if showFVG and bullFVG
+  box b = box.new(bar_index - 2, bullFVGTop, bar_index + 20, bullFVGBottom, border_color=color.new(color.green, 70), bgcolor=color.new(color.green, 88), border_width=1)
+  array.push(fvgBoxes, b)
+  if array.size(fvgBoxes) > 30
+    box.delete(array.shift(fvgBoxes))
+
+if showFVG and bearFVG
+  box b = box.new(bar_index - 2, bearFVGTop, bar_index + 20, bearFVGBottom, border_color=color.new(color.red, 70), bgcolor=color.new(color.red, 88), border_width=1)
+  array.push(fvgBoxes, b)
+  if array.size(fvgBoxes) > 30
+    box.delete(array.shift(fvgBoxes))
+
+inBullFVG = bullFVG[1] or bullFVG[2] or bullFVG[3]
+inBearFVG = bearFVG[1] or bearFVG[2] or bearFVG[3]
+
+// ─── Order Blocks ───────────────────────────────────────────────────────────────
+// Bullish OB: last down candle before impulsive up move
+bullOB = close[1] < open[1] and close > high[1] and (close - open) > atr * 0.5
+bearOB = close[1] > open[1] and close < low[1] and (open - close) > atr * 0.5
+
+var float bullOBTop    = na
+var float bullOBBottom = na
+var float bearOBTop    = na
+var float bearOBBottom = na
+
+if bullOB
+    bullOBTop    := high[1]
+    bullOBBottom := low[1]
+if bearOB
+    bearOBTop    := high[1]
+    bearOBBottom := low[1]
+
+nearBullOB = not na(bullOBBottom) and low <= bullOBTop and low >= bullOBBottom
+nearBearOB = not na(bearOBBottom) and high >= bearOBBottom and high <= bearOBTop
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CONFLUENCE SCORING (high winrate = strict multi-factor alignment)
+// 6 factors: PD zone | RSI/sweep | Fib GP | liquidity sweep | OB/FVG | struct/div
+// ═══════════════════════════════════════════════════════════════════════════════
+scoreLongZone   = inDiscount ? 1 : 0
+scoreLongRsi    = (rsiOversold or (contrarian and bullSweep)) ? 1 : 0
+scoreLongFib    = requireFib ? (inGoldenPocketLong ? 1 : 0) : 1
+scoreLongSweep  = requireSweep ? (bullSweep ? 1 : 0) : 1
+scoreLongOB     = (nearBullOB or inBullFVG) ? 1 : 0
+scoreLongStruct = (structure >= 0 and (useDiv ? bullishDiv : true)) ? 1 : 0
+
+scoreShortZone   = inPremium ? 1 : 0
+scoreShortRsi    = (rsiOverbought or (contrarian and bearSweep)) ? 1 : 0
+scoreShortFib    = requireFib ? (inGoldenPocketShort ? 1 : 0) : 1
+scoreShortSweep  = requireSweep ? (bearSweep ? 1 : 0) : 1
+scoreShortOB     = (nearBearOB or inBearFVG) ? 1 : 0
+scoreShortStruct = (structure <= 0 and (useDiv ? bearishDiv : true)) ? 1 : 0
+
+longScore  = scoreLongZone + scoreLongRsi + scoreLongFib + scoreLongSweep + scoreLongOB + scoreLongStruct
+shortScore = scoreShortZone + scoreShortRsi + scoreShortFib + scoreShortSweep + scoreShortOB + scoreShortStruct
+
+longSignal  = longScore >= minConfluence and longScore > shortScore
+shortSignal = shortScore >= minConfluence and shortScore > longScore
+
+// Avoid signal spam — only fire on new signal
+longEntry  = longSignal and not longSignal[1]
+shortEntry = shortSignal and not shortSignal[1]
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// POSITION SIZING ($1000, 3% risk, 15x leverage)
+// ═══════════════════════════════════════════════════════════════════════════════
+calcPositionSize(isLong) =>
+    float entry = close
+    float sl    = isLong ? entry - atr * atrMultSL : entry + atr * atrMultSL
+    float tp    = isLong ? entry + atr * atrMultSL * rrRatio : entry - atr * atrMultSL * rrRatio
+    float slDist = math.abs(entry - sl)
+    float slPct  = slDist / entry * 100.0
+    float posUnits = slDist > 0 ? riskAmount / slDist : 0.0
+    float posValue = posUnits * entry
+    float posValueCapped = math.min(posValue, maxNotional)
+    float marginReq = posValueCapped / leverage
+    [entry, sl, tp, slPct, posUnits, posValueCapped, marginReq]
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// VISUALS
+// ═══════════════════════════════════════════════════════════════════════════════
+// Premium / Discount shading
+bgcolor(showPD and not na(equilibrium) ? (inDiscount ? color.new(color.green, 95) : color.new(color.red, 95)) : na, title="PD Zone")
+
+// Order blocks
+var box bullOBBox = na
+var box bearOBBox = na
+if showOB and bullOB
+    if not na(bullOBBox)
+        box.delete(bullOBBox)
+    bullOBBox := box.new(bar_index - 1, bullOBTop, bar_index + 30, bullOBBottom, border_color=color.new(color.teal, 40), bgcolor=color.new(color.teal, 85))
+if showOB and bearOB
+    if not na(bearOBBox)
+        box.delete(bearOBBox)
+    bearOBBox := box.new(bar_index - 1, bearOBTop, bar_index + 30, bearOBBottom, border_color=color.new(color.orange, 40), bgcolor=color.new(color.orange, 85))
+
+// Fibonacci lines (refresh on new swing)
+if showFib and barstate.islast and not na(fib500)
+    if array.size(fibLines) > 0
+        for i = 0 to array.size(fibLines) - 1
+            line.delete(array.get(fibLines, i))
+    if array.size(fibLabels) > 0
+        for i = 0 to array.size(fibLabels) - 1
+            label.delete(array.get(fibLabels, i))
+    array.clear(fibLines)
+    array.clear(fibLabels)
+
+    int startBar = math.max(0, bar_index - 200)
+    float[] levels = array.from(fib0, fib236, fib382, fib500, fib618, fib786, fib100)
+    string[] names = array.from("0%", "23.6%", "38.2%", "50%", "61.8%", "78.6%", "100%")
+    color[] cols   = array.from(color.gray, color.new(color.blue, 30), color.new(color.blue, 20), color.yellow, color.new(color.purple, 0), color.new(color.purple, 30), color.gray)
+
+    for i = 0 to 6
+        float lvl = array.get(levels, i)
+        if not na(lvl)
+            line ln = line.new(startBar, lvl, bar_index + 10, lvl, color=array.get(cols, i), width=i == 4 or i == 5 ? 2 : 1, style=line.style_dashed)
+            label lb = label.new(bar_index + 10, lvl, array.get(names, i) + " (" + str.tostring(lvl, format.mintick) + ")", style=label.style_label_left, color=color.new(color.black, 80), textcolor=array.get(cols, i), size=size.tiny)
+            array.push(fibLines, ln)
+            array.push(fibLabels, lb)
+
+// Golden pocket highlight
+plot(showFib and not na(fib618) ? fib618 : na, "Fib 61.8%", color=color.new(color.purple, 50), linewidth=1, style=plot.style_circles)
+plot(showFib and not na(fib786) ? fib786 : na, "Fib 78.6%", color=color.new(color.purple, 50), linewidth=1, style=plot.style_circles)
+plot(showPD and not na(equilibrium) ? equilibrium : na, "Equilibrium 50%", color=color.new(color.yellow, 30), linewidth=2)
+
+// Entry signals
+plotshape(longEntry, title="Long", style=shape.triangleup, location=location.belowbar, color=color.new(color.lime, 0), size=size.normal, text="LONG")
+plotshape(shortEntry, title="Short", style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 0), size=size.normal, text="SHORT")
+
+// Trade info labels
+if longEntry
+    [entry, sl, tp, slPct, posUnits, posValue, margin] = calcPositionSize(true)
+    label.new(bar_index, low, "LONG | Score: " + str.tostring(longScore) + "/6\n" +
+      "Entry: " + str.tostring(entry, format.mintick) + "\n" +
+      "SL: " + str.tostring(sl, format.mintick) + " (-" + str.tostring(slPct, "#.##") + "%)\n" +
+      "TP: " + str.tostring(tp, format.mintick) + " (R:R " + str.tostring(rrRatio) + ")\n" +
+      "Risk: $" + str.tostring(riskAmount, "#.##") + " (" + str.tostring(riskPct) + "%)\n" +
+      "Size: $" + str.tostring(posValue, "#.##") + " @ " + str.tostring(leverage) + "x\n" +
+      "Margin: $" + str.tostring(margin, "#.##"),
+      style=label.style_label_up, color=color.new(color.green, 15), textcolor=color.white, size=size.small)
+
+if shortEntry
+    [entry, sl, tp, slPct, posUnits, posValue, margin] = calcPositionSize(false)
+    label.new(bar_index, high, "SHORT | Score: " + str.tostring(shortScore) + "/6\n" +
+      "Entry: " + str.tostring(entry, format.mintick) + "\n" +
+      "SL: " + str.tostring(sl, format.mintick) + " (-" + str.tostring(slPct, "#.##") + "%)\n" +
+      "TP: " + str.tostring(tp, format.mintick) + " (R:R " + str.tostring(rrRatio) + ")\n" +
+      "Risk: $" + str.tostring(riskAmount, "#.##") + " (" + str.tostring(riskPct) + "%)\n" +
+      "Size: $" + str.tostring(posValue, "#.##") + " @ " + str.tostring(leverage) + "x\n" +
+      "Margin: $" + str.tostring(margin, "#.##"),
+      style=label.style_label_down, color=color.new(color.red, 15), textcolor=color.white, size=size.small)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ALERTS
+// ═══════════════════════════════════════════════════════════════════════════════
+alertcondition(longEntry,  title="ICT Long Entry",  message="ICT Contrarian Long — check label for SL/TP/size")
+alertcondition(shortEntry, title="ICT Short Entry", message="ICT Contrarian Short — check label for SL/TP/size")
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DASHBOARD TABLE
+// ═══════════════════════════════════════════════════════════════════════════════
+var table dash = table.new(position.top_right, 2, 10, bgcolor=color.new(color.black, 80), border_width=1)
+
+if barstate.islast
+    table.cell(dash, 0, 0, "Account", text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 0, "$" + str.tostring(accountSize), text_color=color.white, text_size=size.small)
+    table.cell(dash, 0, 1, "Risk/Trade", text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 1, "$" + str.tostring(riskAmount, "#.##") + " (" + str.tostring(riskPct) + "%)", text_color=color.orange, text_size=size.small)
+    table.cell(dash, 0, 2, "Leverage", text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 2, str.tostring(leverage) + "x / $" + str.tostring(maxNotional, "#"), text_color=color.white, text_size=size.small)
+    table.cell(dash, 0, 3, "RSI", text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 3, str.tostring(rsi, "#.#"), text_color=rsiOversold ? color.lime : rsiOverbought ? color.red : color.white, text_size=size.small)
+    table.cell(dash, 0, 4, "Zone", text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 4, inDiscount ? "DISCOUNT" : inPremium ? "PREMIUM" : "EQ", text_color=inDiscount ? color.lime : inPremium ? color.red : color.yellow, text_size=size.small)
+    table.cell(dash, 0, 5, "Structure", text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 5, structure == 1 ? "BULLISH" : structure == -1 ? "BEARISH" : "NEUTRAL", text_color=structure == 1 ? color.lime : structure == -1 ? color.red : color.gray, text_size=size.small)
+    table.cell(dash, 0, 6, "Long Score", text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 6, str.tostring(longScore) + "/6", text_color=longScore >= minConfluence ? color.lime : color.gray, text_size=size.small)
+    table.cell(dash, 0, 7, "Short Score", text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 7, str.tostring(shortScore) + "/6", text_color=shortScore >= minConfluence ? color.red : color.gray, text_size=size.small)
+    table.cell(dash, 0, 8, "Sweep", text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 8, bullSweep ? "BULL SWEEP" : bearSweep ? "BEAR SWEEP" : "—", text_color=bullSweep ? color.lime : bearSweep ? color.red : color.gray, text_size=size.small)
+    table.cell(dash, 0, 9, "Divergence", text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 9, bullishDiv ? "BULL DIV" : bearishDiv ? "BEAR DIV" : "—", text_color=bullishDiv ? color.lime : bearishDiv ? color.red : color.gray, text_size=size.small)
