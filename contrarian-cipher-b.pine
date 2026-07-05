@@ -141,6 +141,8 @@ riskPct     = input.float(3.0,  'Risk Per Trade (% of account)', minval = 0.1, m
      tooltip = 'Alerts and the table show the position size where hitting the stop loses exactly this % of the account: qty = account × risk% ÷ stop distance.')
 leverageX   = input.float(10, 'Leverage (for margin / liquidation info)', minval = 1, maxval = 125, group = grpSiz,
      tooltip = 'Only affects the displayed margin and the liquidation buffer check (approx. liq distance = 100% / leverage). It does not change risk if the stop is respected.')
+compoundEquity = input.bool(true, 'Compound Simulated Equity', group = grpSiz,
+     tooltip = 'Sizes each new signal from the running simulated balance (start = Account Size, adjusted by every resolved TP/SL trade in the winrate table) instead of the fixed account size. Only active in ATR Stop/Target evaluation mode. The strategy script always compounds via strategy.equity.')
 
 // --- Winrate table ---
 grpTbl = 'Winrate Table'
@@ -424,10 +426,15 @@ alertcondition(fadeWarnShort,  'Fade Warning (short)',   'Contrarian Cipher B: l
 // bracket levels and risk-based position size ready to copy into the exchange.
 alertPrefix = syminfo.ticker + ' ' + timeframe.period + ' | Contrarian Cipher B | '
 
+// Simulated running balance: starts at Account Size and is updated by every
+// resolved TP/SL trade in the winrate table (see that section below).
+var float simEquity = accountSize
+effAccount = compoundEquity ? simEquity : accountSize
+
 sizeStopDist = tblAtrStop * atrVal
-sizeQty      = accountSize * riskPct / 100 / sizeStopDist
+sizeQty      = effAccount * riskPct / 100 / sizeStopDist
 sizeMargin   = sizeQty * close / leverageX
-sizeTxt      = ' | qty ' + str.tostring(sizeQty, '#.####') + ' (' + str.tostring(riskPct, '#.#') + '% risk, margin $' + str.tostring(sizeMargin, '#.##') + ' @' + str.tostring(leverageX, '#') + 'x)'
+sizeTxt      = ' | qty ' + str.tostring(sizeQty, '#.####') + ' (' + str.tostring(riskPct, '#.#') + '% of $' + str.tostring(effAccount, '#.##') + ', margin $' + str.tostring(sizeMargin, '#.##') + ' @' + str.tostring(leverageX, '#') + 'x)'
 buySLtxt     = ' | SL ' + str.tostring(close - sizeStopDist, format.mintick) + ' | TP ' + str.tostring(close + tblAtrTgt * atrVal, format.mintick)
 sellSLtxt    = ' | SL ' + str.tostring(close + sizeStopDist, format.mintick) + ' | TP ' + str.tostring(close - tblAtrTgt * atrVal, format.mintick)
 
@@ -525,6 +532,11 @@ if useTpslMode
                     exitP  = hitStop ? stopP : hitTgt ? tgtP : close
                     retPct = dir == 1 ? (exitP - entryP) / entryP * 100 : (entryP - exitP) / entryP * 100
                     isWin  = hitStop ? false : hitTgt ? true : retPct > 0
+                    // Compound the simulated balance: result in R-multiples of the
+                    // risked amount (riskPct% of equity at stake per trade)
+                    stopPctTrade = math.abs(entryP - stopP) / entryP * 100
+                    rMult = stopPctTrade > 0 ? retPct / stopPctTrade : 0.0
+                    simEquity := simEquity * (1 + riskPct / 100 * rMult)
                     if dir == 1
                         buyCount  := buyCount + 1
                         buyWins   := buyWins + (isWin ? 1 : 0)
@@ -576,9 +588,10 @@ if showWinTable and barstate.islast
     stopPctNow   = sizeStopDist / close * 100
     liqPctApprox = 100 / leverageX
     liqSafe      = stopPctNow < liqPctApprox * 0.8
-    table.cell(winTable, 0, 4, 'Size @ ' + str.tostring(riskPct, '#.#') + '% risk', text_color = txtCol, text_size = size.small)
+    eqCol = effAccount >= accountSize ? winCol : lossCol
+    table.cell(winTable, 0, 4, 'Equity $' + str.tostring(effAccount, '#.##') + (compoundEquity ? ' (compounded)' : ''), text_color = eqCol, text_size = size.small)
     table.cell(winTable, 1, 4, 'qty ' + str.tostring(sizeQty, '#.####'), text_color = txtCol, text_size = size.small)
-    table.cell(winTable, 2, 4, 'risk $' + str.tostring(accountSize * riskPct / 100, '#.##'), text_color = txtCol, text_size = size.small)
+    table.cell(winTable, 2, 4, 'risk $' + str.tostring(effAccount * riskPct / 100, '#.##') + ' (' + str.tostring(riskPct, '#.#') + '%)', text_color = txtCol, text_size = size.small)
     table.cell(winTable, 3, 4, 'margin $' + str.tostring(sizeMargin, '#.##'), text_color = txtCol, text_size = size.small)
     table.cell(winTable, 0, 5, 'Stop vs Liq @' + str.tostring(leverageX, '#') + 'x', text_color = txtCol, text_size = size.small)
     table.cell(winTable, 1, 5, 'stop ' + str.tostring(stopPctNow, '#.##') + '%', text_color = txtCol, text_size = size.small)
