@@ -134,6 +134,14 @@ alertOnDiv    = input.bool(false, 'Alert: Divergences',     group = grpAlr)
 alertOnFade   = input.bool(false, 'Alert: Fade Warnings',   group = grpAlr,
      tooltip = 'These toggles control the dynamic alert() messages. Create ONE alert in TradingView with condition "Any alert() function call" and it will cover everything enabled here, with ticker/timeframe/price/score filled in automatically.')
 
+// --- Position sizing (alerts & table) ---
+grpSiz = 'Position Sizing'
+accountSize = input.float(1000, 'Account Size ($)', minval = 1, group = grpSiz)
+riskPct     = input.float(3.0,  'Risk Per Trade (% of account)', minval = 0.1, maxval = 100, step = 0.5, group = grpSiz,
+     tooltip = 'Alerts and the table show the position size where hitting the stop loses exactly this % of the account: qty = account × risk% ÷ stop distance.')
+leverageX   = input.float(10, 'Leverage (for margin / liquidation info)', minval = 1, maxval = 125, group = grpSiz,
+     tooltip = 'Only affects the displayed margin and the liquidation buffer check (approx. liq distance = 100% / leverage). It does not change risk if the stop is respected.')
+
 // --- Winrate table ---
 grpTbl = 'Winrate Table'
 showWinTable = input.bool(true, 'Show Signal Winrate Table', group = grpTbl)
@@ -412,18 +420,26 @@ alertcondition(fadeWarnShort,  'Fade Warning (short)',   'Contrarian Cipher B: l
 
 // Dynamic alert() messages: create ONE TradingView alert on this indicator with
 // condition "Any alert() function call" and every enabled event below fires
-// through it with live ticker / timeframe / price / score details.
+// through it with live ticker / timeframe / price / score details, plus the
+// bracket levels and risk-based position size ready to copy into the exchange.
 alertPrefix = syminfo.ticker + ' ' + timeframe.period + ' | Contrarian Cipher B | '
+
+sizeStopDist = tblAtrStop * atrVal
+sizeQty      = accountSize * riskPct / 100 / sizeStopDist
+sizeMargin   = sizeQty * close / leverageX
+sizeTxt      = ' | qty ' + str.tostring(sizeQty, '#.####') + ' (' + str.tostring(riskPct, '#.#') + '% risk, margin $' + str.tostring(sizeMargin, '#.##') + ' @' + str.tostring(leverageX, '#') + 'x)'
+buySLtxt     = ' | SL ' + str.tostring(close - sizeStopDist, format.mintick) + ' | TP ' + str.tostring(close + tblAtrTgt * atrVal, format.mintick)
+sellSLtxt    = ' | SL ' + str.tostring(close + sizeStopDist, format.mintick) + ' | TP ' + str.tostring(close - tblAtrTgt * atrVal, format.mintick)
 
 if barstate.isconfirmed
     if alertOnStrong and strongBuy
-        alert(alertPrefix + 'STRONG BUY @ ' + str.tostring(close) + ' | score ' + str.tostring(scoreOS, '#') + '/100 | extreme oversold + divergence. Fade the panic.', alert.freq_once_per_bar_close)
+        alert(alertPrefix + 'STRONG BUY @ ' + str.tostring(close) + buySLtxt + sizeTxt + ' | score ' + str.tostring(scoreOS, '#') + '/100 | extreme oversold + divergence. Fade the panic.', alert.freq_once_per_bar_close)
     else if alertOnBuy and contrarianBuy
-        alert(alertPrefix + 'BUY @ ' + str.tostring(close) + ' | score ' + str.tostring(scoreOS, '#') + '/100 | crowd extremely bearish, WT crossed up.', alert.freq_once_per_bar_close)
+        alert(alertPrefix + 'BUY @ ' + str.tostring(close) + buySLtxt + sizeTxt + ' | score ' + str.tostring(scoreOS, '#') + '/100 | crowd extremely bearish, WT crossed up.', alert.freq_once_per_bar_close)
     if alertOnStrong and strongSell
-        alert(alertPrefix + 'STRONG SELL @ ' + str.tostring(close) + ' | score ' + str.tostring(scoreOB, '#') + '/100 | extreme overbought + divergence. Fade the euphoria.', alert.freq_once_per_bar_close)
+        alert(alertPrefix + 'STRONG SELL @ ' + str.tostring(close) + sellSLtxt + sizeTxt + ' | score ' + str.tostring(scoreOB, '#') + '/100 | extreme overbought + divergence. Fade the euphoria.', alert.freq_once_per_bar_close)
     else if alertOnSell and contrarianSell
-        alert(alertPrefix + 'SELL @ ' + str.tostring(close) + ' | score ' + str.tostring(scoreOB, '#') + '/100 | crowd extremely bullish, WT crossed down.', alert.freq_once_per_bar_close)
+        alert(alertPrefix + 'SELL @ ' + str.tostring(close) + sellSLtxt + sizeTxt + ' | score ' + str.tostring(scoreOB, '#') + '/100 | crowd extremely bullish, WT crossed down.', alert.freq_once_per_bar_close)
     if alertOnDiv and wtBullDiv
         alert(alertPrefix + 'Bullish divergence on WaveTrend @ ' + str.tostring(close), alert.freq_once_per_bar_close)
     if alertOnDiv and wtBearDiv
@@ -523,7 +539,7 @@ if useTpslMode
                     array.remove(pendDir, i)
                     array.remove(pendBar, i)
 
-var table winTable = table.new(f_tablePos(tblPosStr), 4, 4, bgcolor = color.new(#1e222d, 15), border_width = 1, border_color = color.new(#434651, 50))
+var table winTable = table.new(f_tablePos(tblPosStr), 4, 6, bgcolor = color.new(#1e222d, 15), border_width = 1, border_color = color.new(#434651, 50))
 
 f_pct(int wins, int total) =>
     total > 0 ? str.tostring(100.0 * wins / total, '#.#') + '%' : '—'
@@ -555,3 +571,16 @@ if showWinTable and barstate.islast
     table.cell(winTable, 1, 3, str.tostring(totalCount), text_color = txtCol, text_size = size.small)
     table.cell(winTable, 2, 3, f_pct(totalWins, totalCount), text_color = totalCount > 0 and totalWins * 2 >= totalCount ? winCol : lossCol, text_size = size.small)
     table.cell(winTable, 3, 3, f_avg(buySumRet + sellSumRet, totalCount), text_color = buySumRet + sellSumRet >= 0 ? winCol : lossCol, text_size = size.small)
+
+    // Live position sizing + approximate liquidation buffer check
+    stopPctNow   = sizeStopDist / close * 100
+    liqPctApprox = 100 / leverageX
+    liqSafe      = stopPctNow < liqPctApprox * 0.8
+    table.cell(winTable, 0, 4, 'Size @ ' + str.tostring(riskPct, '#.#') + '% risk', text_color = txtCol, text_size = size.small)
+    table.cell(winTable, 1, 4, 'qty ' + str.tostring(sizeQty, '#.####'), text_color = txtCol, text_size = size.small)
+    table.cell(winTable, 2, 4, 'risk $' + str.tostring(accountSize * riskPct / 100, '#.##'), text_color = txtCol, text_size = size.small)
+    table.cell(winTable, 3, 4, 'margin $' + str.tostring(sizeMargin, '#.##'), text_color = txtCol, text_size = size.small)
+    table.cell(winTable, 0, 5, 'Stop vs Liq @' + str.tostring(leverageX, '#') + 'x', text_color = txtCol, text_size = size.small)
+    table.cell(winTable, 1, 5, 'stop ' + str.tostring(stopPctNow, '#.##') + '%', text_color = txtCol, text_size = size.small)
+    table.cell(winTable, 2, 5, 'liq ~' + str.tostring(liqPctApprox, '#.##') + '%', text_color = txtCol, text_size = size.small)
+    table.cell(winTable, 3, 5, liqSafe ? 'OK' : 'LIQ RISK!', text_color = liqSafe ? winCol : lossCol, text_size = size.small)

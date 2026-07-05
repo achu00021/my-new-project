@@ -36,6 +36,14 @@ grpTbl = 'Performance Table'
 showStatsTable = input.bool(true, 'Show Performance Table', group = grpTbl)
 tblPosStr      = input.string('Top Right', 'Table Position', options = ['Top Right', 'Top Left', 'Bottom Right', 'Bottom Left'], group = grpTbl)
 
+// --- Position sizing ---
+grpSiz = 'Position Sizing'
+useRiskSizing = input.bool(true, 'Risk-Based Position Sizing', group = grpSiz,
+     tooltip = 'Sizes each trade so that hitting the stop loss costs exactly the chosen % of equity: qty = equity × risk% ÷ stop distance. This is how leverage trading should be sized — leverage itself only affects margin used and liquidation distance, not risk.')
+riskPct   = input.float(3.0, 'Risk Per Trade (% of equity)', minval = 0.1, maxval = 100, step = 0.5, group = grpSiz)
+leverageX = input.float(10, 'Leverage (for margin / liquidation info)', minval = 1, maxval = 125, group = grpSiz,
+     tooltip = 'Used only to display margin required and to warn when the stop distance gets close to the approximate liquidation distance (100% / leverage). It does not change position size or risk.')
+
 // --- Trade settings ---
 grpTrade = 'Trade Settings'
 tradeDirection = input.string('Both', 'Trade Direction', options = ['Both', 'Long Only', 'Short Only'], group = grpTrade)
@@ -256,15 +264,21 @@ var float entryAtr = na
 
 alertTicker = syminfo.ticker + ' ' + timeframe.period + ' | CCB v2 | '
 
+// Risk-based sizing: hitting the stop loses exactly riskPct% of current equity
+stopDistNow = atrStopMult * atrVal
+riskQty     = strategy.equity * riskPct / 100 / stopDistNow
+marginNow   = riskQty * close / leverageX
+sizeTxt     = ' | qty ' + str.tostring(riskQty, '#.####') + ' | margin $' + str.tostring(marginNow, '#.##') + ' @' + str.tostring(leverageX, '#') + 'x'
+
 if contrarianBuy and allowLong and strategy.position_size <= 0
     entryAtr := atrVal
-    strategy.entry('Long', strategy.long,
-         alert_message = alertTicker + 'ENTER LONG @ ' + str.tostring(close) + ' | SL ' + str.tostring(close - atrStopMult * atrVal, format.mintick) + ' | TP ' + str.tostring(close + atrTargetMult * atrVal, format.mintick))
+    strategy.entry('Long', strategy.long, qty = useRiskSizing ? riskQty : na,
+         alert_message = alertTicker + 'ENTER LONG @ ' + str.tostring(close) + ' | SL ' + str.tostring(close - atrStopMult * atrVal, format.mintick) + ' | TP ' + str.tostring(close + atrTargetMult * atrVal, format.mintick) + sizeTxt)
 
 if contrarianSell and allowShort and strategy.position_size >= 0
     entryAtr := atrVal
-    strategy.entry('Short', strategy.short,
-         alert_message = alertTicker + 'ENTER SHORT @ ' + str.tostring(close) + ' | SL ' + str.tostring(close + atrStopMult * atrVal, format.mintick) + ' | TP ' + str.tostring(close - atrTargetMult * atrVal, format.mintick))
+    strategy.entry('Short', strategy.short, qty = useRiskSizing ? riskQty : na,
+         alert_message = alertTicker + 'ENTER SHORT @ ' + str.tostring(close) + ' | SL ' + str.tostring(close + atrStopMult * atrVal, format.mintick) + ' | TP ' + str.tostring(close - atrTargetMult * atrVal, format.mintick) + sizeTxt)
 
 if strategy.position_size > 0
     strategy.exit('Long SL/TP', 'Long',
@@ -318,7 +332,7 @@ f_tablePos(simple string s) =>
 f_fmt(float v, string suffix) =>
     na(v) ? '—' : str.tostring(v, '#.##') + suffix
 
-var table statsTable = table.new(f_tablePos(tblPosStr), 3, 8, bgcolor = color.new(#1e222d, 15), border_width = 1, border_color = color.new(#434651, 50))
+var table statsTable = table.new(f_tablePos(tblPosStr), 3, 10, bgcolor = color.new(#1e222d, 15), border_width = 1, border_color = color.new(#434651, 50))
 
 if showStatsTable and barstate.islast
     hdrCol  = color.new(#787b86, 0)
@@ -381,3 +395,14 @@ if showStatsTable and barstate.islast
     table.cell(statsTable, 0, 7, 'Open Position', text_color = txtCol, text_size = size.small)
     table.cell(statsTable, 1, 7, strategy.position_size > 0 ? 'LONG' : strategy.position_size < 0 ? 'SHORT' : 'FLAT', text_color = strategy.position_size > 0 ? winCol : strategy.position_size < 0 ? lossCol : txtCol, text_size = size.small)
     table.cell(statsTable, 2, 7, '', text_color = txtCol, text_size = size.small)
+
+    // Risk sizing summary + approximate liquidation buffer check
+    stopPctNow   = stopDistNow / close * 100
+    liqPctApprox = 100 / leverageX
+    liqSafe      = stopPctNow < liqPctApprox * 0.8
+    table.cell(statsTable, 0, 8, 'Risk / Trade', text_color = txtCol, text_size = size.small)
+    table.cell(statsTable, 1, 8, str.tostring(riskPct, '#.#') + '% ($' + str.tostring(strategy.equity * riskPct / 100, '#.##') + ')', text_color = txtCol, text_size = size.small)
+    table.cell(statsTable, 2, 8, 'qty ' + str.tostring(riskQty, '#.####'), text_color = txtCol, text_size = size.small)
+    table.cell(statsTable, 0, 9, 'Stop vs Liq @' + str.tostring(leverageX, '#') + 'x', text_color = txtCol, text_size = size.small)
+    table.cell(statsTable, 1, 9, str.tostring(stopPctNow, '#.##') + '% / ~' + str.tostring(liqPctApprox, '#.##') + '%', text_color = txtCol, text_size = size.small)
+    table.cell(statsTable, 2, 9, liqSafe ? 'OK' : 'LIQ RISK!', text_color = liqSafe ? winCol : lossCol, text_size = size.small)
